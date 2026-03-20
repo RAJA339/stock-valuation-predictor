@@ -1,0 +1,19 @@
+[theme]
+base = "dark"
+primaryColor = "#028090"
+backgroundColor = "#0D1B2A"
+secondaryBackgroundColor = "#1E293B"
+textColor = "#CADCFC"
+```
+- Save it **inside the `.streamlit` folder** and name it: `config.toml`
+- Again use **All Files** on Windows to avoid `.toml.txt`
+
+---
+
+## Your folder should look like this when done:
+```
+🗂️ stock-valuation-predictor/
+    📄 app.py
+    📄 requirements.txt
+    🗂️ .streamlit/
+        📄 config.toml
