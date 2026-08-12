@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  smoke-test:
+    name: Build & smoke-test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    defaults:
+      run:
+        working-directory: OneDrive/Desktop/stock-valuation-predictor
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Byte-compile all sources
+        run: |
+          python -m py_compile app.py
+          python -m compileall -q svp
+
+      - name: Import the svp package
+        run: python -c "import svp; print('svp', svp.__version__)"
+
+      - name: Offline pipeline smoke test
+        env:
+          # Keep the test fully offline & deterministic — no external APIs hit.
+          HTTPS_PROXY: ""
+          HTTP_PROXY: ""
+        run: python ci/smoke_test.py
+
+      - name: Streamlit AppTest (renders all tabs, asserts no exceptions)
+        run: python ci/apptest_check.py
