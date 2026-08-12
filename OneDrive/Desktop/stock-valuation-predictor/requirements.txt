@@ -1,7 +1,29 @@
+# ── Core app / ML ────────────────────────────────────────────────────────────
 streamlit>=1.35.0
 pandas>=2.0.0
 numpy>=1.26.0
-xgboost>=2.0.0
+xgboost>=2.0.0            # native quantile (pinball) objective for value ranges
 scikit-learn>=1.4.0
+scipy>=1.11.0
 requests>=2.31.0
 matplotlib>=3.8.0
+
+# ── Explainable AI ───────────────────────────────────────────────────────────
+shap>=0.44.0             # SHAP waterfall / feature attribution
+lime>=0.2.0.1            # optional secondary local explainer
+
+# ── Live data pipelines ──────────────────────────────────────────────────────
+yfinance>=0.2.40         # live prices, market cap, history, peer multiples
+fredapi>=0.5.1           # real-time FRED macro (yield curve, CPI, rates)
+
+# ── Reports ──────────────────────────────────────────────────────────────────
+reportlab>=4.0.0         # one-click PDF equity research reports
+
+# ── Optional (heavy) — enable FinBERT earnings-call sentiment ─────────────────
+# Uncomment to use the FinBERT model instead of the built-in lexicon fallback.
+# transformers>=4.40.0
+# torch>=2.2.0
+
+# ── Optional persistent cache backend (PostgreSQL / Snowflake-style) ─────────
+# Set DATABASE_URL and uncomment to use Postgres instead of the SQLite default.
+# psycopg2-binary>=2.9.0

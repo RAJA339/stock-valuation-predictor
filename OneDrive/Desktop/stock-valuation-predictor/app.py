@@ -1,31 +1,48 @@
 """
-Intrinsic Stock Valuation Predictor
+Intrinsic Stock Valuation Predictor  —  v2.0
+============================================
 Webster University — MS Business Analytics | Group ML Project
 Author: Raja Mupparaju
 
-GitHub: Push this entire folder to a GitHub repo, then deploy on Streamlit Cloud.
+A Streamlit application that predicts a company's intrinsic value from SEC EDGAR
+fundamentals, live market data, real-time macro indicators and earnings-call
+sentiment, then explains and stress-tests that prediction.
+
+Feature areas (each in its own tab):
+  1. Valuation        — XGBoost point estimate + quantile intrinsic-value range
+  2. Explainability   — SHAP / LIME per-feature attribution (waterfall)
+  3. DCF & Scenario   — interactive DCF (WACC / terminal-growth sliders) + Monte-Carlo
+  4. Peer Benchmarking— EV/EBITDA, P/E, Debt/Equity vs industry peers
+  5. Backtesting      — signal performance over 1/3/5-year horizons
+  6. Report           — one-click PDF equity research summary
+
+The heavy lifting lives in the ``svp`` package. Every data/ML dependency degrades
+gracefully, so the app runs even without network access or optional libraries.
 """
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-import requests
-import xgboost as xgb
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, r2_score
-import matplotlib
+from __future__ import annotations
 
-# Streamlit runs the app logic in a worker thread. Using a GUI matplotlib backend
-# (e.g., TkAgg/Qt5Agg) can trigger "MainThread is not in main loop" errors.
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import warnings
+
 warnings.filterwarnings("ignore")
 
+import matplotlib
+
+matplotlib.use("Agg")  # headless backend — avoids Streamlit worker-thread GUI errors
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+from svp import theme
+from svp.features import build_features, FEATURE_LABELS
+from svp.data import market as market_mod, macro as macro_mod, sentiment as sent_mod, storage
+from svp.models import valuation as val_mod, explain as explain_mod, dcf as dcf_mod, backtest as bt_mod
+from svp.analytics import peers as peers_mod
+from svp import reports
+
 # ──────────────────────────────────────────────────────────────────────────────
-# PAGE CONFIG
+# PAGE CONFIG + THEME
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Intrinsic Stock Valuation Predictor",
@@ -33,433 +50,542 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-# ──────────────────────────────────────────────────────────────────────────────
-# CUSTOM CSS
-# ──────────────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-    .main { background-color: #0D1B2A; }
-    .stApp { background-color: #0D1B2A; color: #CADCFC; }
-    .metric-card {
-        background: #1E293B;
-        border-radius: 10px;
-        padding: 20px;
-        border-left: 4px solid #028090;
-        margin-bottom: 15px;
-    }
-    .metric-value { font-size: 2.5rem; font-weight: bold; color: #02C39A; }
-    .metric-label { font-size: 0.85rem; color: #94A3B8; }
-    .signal-buy  { color: #02C39A; font-size: 1.3rem; font-weight: bold; }
-    .signal-hold { color: #F9C846; font-size: 1.3rem; font-weight: bold; }
-    .signal-over { color: #F96167; font-size: 1.3rem; font-weight: bold; }
-    .section-header {
-        font-size: 1.2rem; font-weight: bold;
-        color: #CADCFC; border-bottom: 2px solid #028090;
-        padding-bottom: 6px; margin-bottom: 12px;
-    }
-    div[data-testid="stSidebar"] { background-color: #1E2761; }
-</style>
-""", unsafe_allow_html=True)
+st.markdown(theme.CSS, unsafe_allow_html=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# DATA FETCHING — SEC EDGAR
+# CACHED RESOURCES
 # ──────────────────────────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_cik(ticker: str) -> str | None:
-    """Map ticker symbol → SEC CIK number."""
-    url = "https://www.sec.gov/files/company_tickers.json"
-    headers = {"User-Agent": "StockValuationApp contact@example.com"}
-    try:
-        data = requests.get(url, headers=headers, timeout=10).json()
-        for entry in data.values():
-            if entry["ticker"].upper() == ticker.upper():
-                return str(entry["cik_str"]).zfill(10)
-    except Exception:
-        return None
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_financials(cik: str) -> dict:
-    """Fetch company facts from SEC EDGAR XBRL API."""
-    url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
-    headers = {"User-Agent": "StockValuationApp contact@example.com"}
-    try:
-        return requests.get(url, headers=headers, timeout=15).json()
-    except Exception:
-        return {}
-
-
-def extract_latest(facts: dict, concept: str, unit: str = "USD") -> float | None:
-    """Pull the most recent annual value for a given XBRL concept."""
-    try:
-        entries = (
-            facts["facts"]["us-gaap"][concept]["units"][unit]
-        )
-        # Filter 10-K annual filings only
-        annual = [e for e in entries if e.get("form") == "10-K" and "end" in e]
-        if not annual:
-            return None
-        annual.sort(key=lambda x: x["end"], reverse=True)
-        return annual[0]["val"]
-    except (KeyError, IndexError):
-        return None
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# DATA FETCHING — BLS (Macro)
-# ──────────────────────────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_bls_series(series_id: str, start_year: str = "2020", end_year: str = "2024") -> float | None:
-    """Fetch latest value from BLS public API (no API key needed for basic)."""
-    url = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
-    payload = {
-        "seriesid": [series_id],
-        "startyear": start_year,
-        "endyear": end_year,
-    }
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        data = r.json()
-        series_data = data["Results"]["series"][0]["data"]
-        series_data.sort(key=lambda x: (x["year"], x["period"]), reverse=True)
-        return float(series_data[0]["value"])
-    except Exception:
-        return None
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# FEATURE ENGINEERING
-# ──────────────────────────────────────────────────────────────────────────────
-
-def build_features(ticker: str, market_price: float) -> dict | None:
-    """
-    Build the feature vector for a given ticker.
-    Returns a dict of features or None if data is insufficient.
-    """
-    cik = get_cik(ticker)
-    if not cik:
-        return None
-
-    facts = get_financials(cik)
-    if not facts:
-        return None
-
-    # ── Core financial data from SEC EDGAR ──────────────────────────────────
-    revenue        = extract_latest(facts, "Revenues")           or extract_latest(facts, "RevenueFromContractWithCustomerExcludingAssessedTax")
-    net_income     = extract_latest(facts, "NetIncomeLoss")
-    total_assets   = extract_latest(facts, "Assets")
-    total_liab     = extract_latest(facts, "Liabilities")
-    equity         = extract_latest(facts, "StockholdersEquity")
-    op_cash_flow   = extract_latest(facts, "NetCashProvidedByUsedInOperatingActivities")
-    capex          = extract_latest(facts, "PaymentsToAcquirePropertyPlantAndEquipment")
-    shares         = extract_latest(facts, "CommonStockSharesOutstanding", unit="shares")
-    long_term_debt = extract_latest(facts, "LongTermDebt")
-    ebitda         = extract_latest(facts, "OperatingIncomeLoss")   # proxy
-
-    # Guard: must have minimum viable data
-    if None in (net_income, equity, total_assets, market_price) or market_price <= 0:
-        return None
-
-    # ── Derived ratios ───────────────────────────────────────────────────────
-    market_cap     = market_price * (shares or 1e9)
-    eps            = net_income / (shares or 1e9)
-    pe_ratio       = market_price / eps if eps and eps > 0 else np.nan
-    roe            = net_income / equity if equity else np.nan
-    roa            = net_income / total_assets if total_assets else np.nan
-    debt_to_equity = (long_term_debt or 0) / equity if equity else np.nan
-    free_cash_flow = (op_cash_flow or 0) - (capex or 0)
-    fcf_yield      = free_cash_flow / market_cap if market_cap else np.nan
-    revenue_growth = revenue / total_assets if (revenue and total_assets) else np.nan
-    asset_turnover = revenue / total_assets if (revenue and total_assets) else np.nan
-    profit_margin  = net_income / revenue if (revenue and revenue != 0) else np.nan
-
-    # ── Macro data from BLS ─────────────────────────────────────────────────
-    cpi            = get_bls_series("CUUR0000SA0")     # CPI-U
-    unemployment   = get_bls_series("LNS14000000")     # Unemployment rate
-
-    features = {
-        "pe_ratio":       pe_ratio,
-        "roe":            roe,
-        "roa":            roa,
-        "debt_to_equity": debt_to_equity,
-        "fcf_yield":      fcf_yield,
-        "revenue_growth": revenue_growth,
-        "asset_turnover": asset_turnover,
-        "profit_margin":  profit_margin,
-        "cpi":            cpi or 310.0,
-        "unemployment":   unemployment or 4.0,
-        "market_price":   market_price,
-    }
-    return features
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# MODEL — Synthetic training data + XGBoost
-# (In a production system you would load a pre-trained model from a .pkl file)
-# ──────────────────────────────────────────────────────────────────────────────
-
 @st.cache_resource(show_spinner=False)
-def load_model():
-    """
-    Train an XGBoost model on synthetic-but-realistic financial data.
-    In production: replace with joblib.load('model.pkl').
-    """
-    np.random.seed(42)
-    n = 2000
-
-    pe       = np.random.uniform(5, 50, n)
-    roe      = np.random.uniform(-0.2, 0.4, n)
-    roa      = np.random.uniform(-0.1, 0.25, n)
-    de       = np.random.uniform(0, 3.0, n)
-    fcf_y    = np.random.uniform(-0.05, 0.15, n)
-    rev_g    = np.random.uniform(0.3, 2.5, n)
-    at       = np.random.uniform(0.3, 2.0, n)
-    pm       = np.random.uniform(-0.2, 0.4, n)
-    cpi      = np.random.uniform(250, 340, n)
-    unemp    = np.random.uniform(3, 10, n)
-    mkt      = np.random.uniform(10, 500, n)
-
-    # Intrinsic value formula (ground truth for training)
-    intrinsic = (
-        mkt
-        + fcf_y * 800          # FCF yield biggest driver
-        - (pe - 15) * 2        # penalize high P/E
-        + roe * 300            # reward high ROE
-        - de * 20              # penalize leverage
-        + pm * 200             # reward margins
-        - (cpi - 300) * 0.3   # inflation compresses value
-        - unemp * 3            # macro drag
-        + np.random.normal(0, 15, n)  # noise
-    )
-
-    X = pd.DataFrame({
-        "pe_ratio": pe, "roe": roe, "roa": roa,
-        "debt_to_equity": de, "fcf_yield": fcf_y,
-        "revenue_growth": rev_g, "asset_turnover": at,
-        "profit_margin": pm, "cpi": cpi,
-        "unemployment": unemp, "market_price": mkt,
-    })
-    y = intrinsic
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    model = xgb.XGBRegressor(
-        n_estimators=300,
-        max_depth=5,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_alpha=0.1,
-        reg_lambda=1.0,
-        random_state=42,
-        verbosity=0,
-    )
-    model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
-
-    y_pred = model.predict(X_test)
-    r2   = r2_score(y_test, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-
-    return model, r2, rmse, X.columns.tolist()
+def get_model() -> val_mod.ValuationModel:
+    return val_mod.train_model()
 
 
-def predict_intrinsic(features: dict, model, feature_cols: list) -> float:
-    """Run the model and return predicted intrinsic value."""
-    row = pd.DataFrame([{col: features.get(col, np.nan) for col in feature_cols}])
-    row = row.fillna(row.median())
-    return float(model.predict(row)[0])
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_macro_cached():
+    return macro_mod.get_macro()
 
 
-def valuation_signal(intrinsic: float, market: float) -> tuple[str, str]:
-    """Return (signal_label, html_class) based on margin of safety."""
-    diff_pct = (intrinsic - market) / market * 100
-    if diff_pct > 15:
-        return f"🟢 Undervalued  (+{diff_pct:.1f}%)", "signal-buy"
-    elif diff_pct < -15:
-        return f"🔴 Overvalued  ({diff_pct:.1f}%)", "signal-over"
-    else:
-        return f"🟡 Fairly Valued  ({diff_pct:+.1f}%)", "signal-hold"
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_market_cached(ticker: str, fallback_price: float):
+    md = market_mod.get_market_data(ticker, fallback_price=fallback_price)
+    # Cache-friendly: return primitives + history separately.
+    return md
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SIDEBAR
 # ──────────────────────────────────────────────────────────────────────────────
-
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/8/8b/Webster_University_shield.png/120px-Webster_University_shield.png", width=60)
     st.markdown("## 📊 Stock Valuation Predictor")
     st.markdown("*Webster University — MS Business Analytics*")
     st.divider()
 
     ticker = st.text_input("🔤 Stock Ticker Symbol", value="AAPL", max_chars=6).upper().strip()
-    market_price = st.number_input("💵 Current Market Price ($)", min_value=1.0, value=190.0, step=0.5, format="%.2f")
+    use_live_price = st.checkbox("Use live market price (yfinance)", value=True)
+    manual_price = st.number_input(
+        "💵 Market Price override ($)", min_value=0.0, value=0.0, step=0.5, format="%.2f",
+        help="Leave 0 to use the live/last price. Enter a value to override.",
+    )
+
+    with st.expander("📝 Earnings-call transcript (sentiment)"):
+        transcript = st.text_area(
+            "Paste transcript text (optional)", value="", height=120,
+            help="Scored with FinBERT if available, else a finance lexicon.",
+        )
+        if st.checkbox("Use sample transcript"):
+            transcript = sent_mod.SAMPLE_TRANSCRIPT
+
+    run_btn = st.button("🔍  Analyze", type="primary", use_container_width=True)
 
     st.divider()
-    st.markdown("**Model Details**")
-    st.markdown("- Algorithm: XGBoost Regressor")
-    st.markdown("- Data: SEC EDGAR + BLS")
-    st.markdown("- Features: 11 financial & macro")
-    st.markdown("- Tuning: k-fold cross-validation")
-
-    run_btn = st.button("🔍  Predict Intrinsic Value", type="primary", use_container_width=True)
-
-    st.divider()
-    st.caption("⚠️ For educational purposes only. Not financial advice.")
+    st.markdown("**Data & Model**")
+    st.caption(
+        "SEC EDGAR · yfinance/Alpha Vantage · FRED/BLS · FinBERT · "
+        "XGBoost (point + quantile) · SHAP/LIME · DCF Monte-Carlo"
+    )
+    cache_stats = storage.stats()
+    st.caption(f"💾 Cache: {cache_stats['backend']} · {cache_stats['fresh']}/{cache_stats['rows']} fresh rows")
+    st.caption("⚠️ Educational use only. Not financial advice.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MAIN PAGE
+# HEADER + MODEL BANNER
 # ──────────────────────────────────────────────────────────────────────────────
-
 st.markdown("# 📈 Intrinsic Stock Valuation Predictor")
-st.markdown("*Powered by SEC EDGAR · BLS Macro Data · XGBoost ML*")
+st.markdown("*Model Transparency · Live Data Pipelines · Scenario Analytics*")
 st.divider()
 
-# Load model
-with st.spinner("Loading XGBoost model..."):
-    model, model_r2, model_rmse, feature_cols = load_model()
+with st.spinner("Training / loading XGBoost ensemble..."):
+    vm = get_model()
 
-# Model performance banner
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Model R²", f"{model_r2:.3f}", help="Proportion of variance explained by the model")
-with col2:
-    st.metric("Model RMSE", f"${model_rmse:.2f}", help="Root Mean Squared Error on test set")
-with col3:
-    st.metric("Algorithm", "XGBoost", help="Gradient Boosting Regressor")
+macro_now = get_macro_cached()
 
+b1, b2, b3, b4, b5 = st.columns(5)
+b1.metric("Model R²", f"{vm.r2:.3f}", help="Variance explained on held-out synthetic test set")
+b2.metric("Model RMSE", f"${vm.rmse:.2f}", help="Root Mean Squared Error")
+b3.metric("Quantiles", "p10 · p50 · p90", help="Native XGBoost quantile regressors")
+b4.metric("CPI", f"{macro_now.cpi:.1f}", help=f"Macro source: {macro_now.source}")
+b5.metric("10y-2y Curve", f"{macro_now.yield_curve_10y_2y:+.2f}",
+          help="Negative = inverted (recession signal)")
+
+st.markdown(
+    f"Macro data {theme.source_pill(macro_now.is_live, 'FRED/BLS LIVE', 'DEFAULTS')}",
+    unsafe_allow_html=True,
+)
 st.divider()
 
-# ── Prediction flow ──────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ──────────────────────────────────────────────────────────────────────────────
+def metric_card(label: str, value: str, sub: bool = False) -> str:
+    cls = "metric-sub" if sub else "metric-value"
+    return f'<div class="metric-card"><div class="metric-label">{label}</div><div class="{cls}">{value}</div></div>'
+
+
+def run_analysis(ticker: str, price_override: float, transcript: str, use_live: bool) -> dict | None:
+    """Fetch everything for a ticker and stash results in session_state."""
+    md = get_market_cached(ticker, price_override or 100.0)
+    price = None
+    if price_override and price_override > 0:
+        price = price_override
+    elif use_live and md.price:
+        price = md.price
+    else:
+        price = md.price or 100.0
+
+    feats = build_features(ticker, market_price=price, transcript=transcript or None, md=md, macro=macro_now)
+    if feats is None:
+        return None
+
+    result = val_mod.predict(feats, vm)
+    attribution = explain_mod.explain_prediction(feats, vm)
+    signal_text, signal_class = val_mod.valuation_signal(result.point, price)
+
+    return {
+        "ticker": ticker,
+        "price": price,
+        "md": md,
+        "features": feats,
+        "result": result,
+        "attribution": attribution,
+        "signal_text": signal_text,
+        "signal_class": signal_class,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RUN / STATE
+# ──────────────────────────────────────────────────────────────────────────────
 if run_btn:
     if not ticker:
         st.warning("Please enter a ticker symbol.")
     else:
-        with st.spinner(f"Fetching financial data for **{ticker}** from SEC EDGAR & BLS..."):
-            features = build_features(ticker, market_price)
-
-        if features is None:
+        with st.spinner(f"Analyzing **{ticker}** — SEC EDGAR · market · macro · sentiment..."):
+            analysis = run_analysis(ticker, manual_price, transcript, use_live_price)
+        if analysis is None:
             st.error(
-                f"❌ Could not retrieve sufficient financial data for **{ticker}**. "
-                "Please check the ticker symbol or try a major US listed company (e.g. AAPL, MSFT, GOOGL)."
+                f"❌ Could not retrieve sufficient fundamentals for **{ticker}**. "
+                "Try a major US-listed company (e.g. AAPL, MSFT, GOOGL, JPM)."
             )
         else:
-            intrinsic = predict_intrinsic(features, model, feature_cols)
-            signal_text, signal_class = valuation_signal(intrinsic, market_price)
+            st.session_state["analysis"] = analysis
 
-            # ── Results row ─────────────────────────────────────────────────
-            st.markdown(f"### Results for **{ticker}**")
-            r1, r2, r3 = st.columns(3)
+analysis = st.session_state.get("analysis")
 
-            with r1:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-label">Predicted Intrinsic Value</div>
-                    <div class="metric-value">${intrinsic:.2f}</div>
-                </div>""", unsafe_allow_html=True)
-
-            with r2:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-label">Current Market Price</div>
-                    <div class="metric-value">${market_price:.2f}</div>
-                </div>""", unsafe_allow_html=True)
-
-            with r3:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-label">Valuation Signal</div>
-                    <div class="{signal_class}">{signal_text}</div>
-                </div>""", unsafe_allow_html=True)
-
-            st.divider()
-
-            # ── Feature breakdown ────────────────────────────────────────────
-            left, right = st.columns([1, 1])
-
-            with left:
-                st.markdown('<div class="section-header">📋 Extracted Financial Features</div>', unsafe_allow_html=True)
-
-                display_features = {
-                    "P/E Ratio":            f"{features.get('pe_ratio', np.nan):.2f}" if not np.isnan(features.get('pe_ratio', np.nan)) else "N/A",
-                    "Return on Equity":     f"{features.get('roe', np.nan)*100:.1f}%" if not np.isnan(features.get('roe', np.nan)) else "N/A",
-                    "Return on Assets":     f"{features.get('roa', np.nan)*100:.1f}%" if not np.isnan(features.get('roa', np.nan)) else "N/A",
-                    "Debt-to-Equity":       f"{features.get('debt_to_equity', np.nan):.2f}" if not np.isnan(features.get('debt_to_equity', np.nan)) else "N/A",
-                    "FCF Yield":            f"{features.get('fcf_yield', np.nan)*100:.2f}%" if not np.isnan(features.get('fcf_yield', np.nan)) else "N/A",
-                    "Profit Margin":        f"{features.get('profit_margin', np.nan)*100:.1f}%" if not np.isnan(features.get('profit_margin', np.nan)) else "N/A",
-                    "CPI (latest)":         f"{features.get('cpi', 'N/A'):.1f}",
-                    "Unemployment Rate":    f"{features.get('unemployment', 'N/A'):.1f}%",
-                }
-                feat_df = pd.DataFrame(display_features.items(), columns=["Feature", "Value"])
-                st.dataframe(feat_df, use_container_width=True, hide_index=True)
-
-            with right:
-                st.markdown('<div class="section-header">📊 Feature Importance</div>', unsafe_allow_html=True)
-
-                # Get XGBoost feature importance
-                importance = model.feature_importances_
-                feat_names_short = [
-                    "P/E Ratio", "ROE", "ROA", "Debt/Equity",
-                    "FCF Yield", "Rev Growth", "Asset Turnover",
-                    "Profit Margin", "CPI", "Unemployment", "Market Price"
-                ]
-                sorted_idx = np.argsort(importance)[::-1][:8]
-                top_names  = [feat_names_short[i] for i in sorted_idx]
-                top_vals   = importance[sorted_idx]
-
-                fig, ax = plt.subplots(figsize=(5.5, 3.8))
-                fig.patch.set_facecolor("#1E293B")
-                ax.set_facecolor("#1E293B")
-                bars = ax.barh(top_names[::-1], top_vals[::-1], color="#028090", edgecolor="none", height=0.6)
-                bars[0].set_color("#02C39A")
-                ax.set_xlabel("Importance Score", color="#94A3B8", fontsize=9)
-                ax.tick_params(colors="#CADCFC", labelsize=8.5)
-                ax.spines[:].set_visible(False)
-                ax.xaxis.label.set_color("#94A3B8")
-                for spine in ax.spines.values():
-                    spine.set_edgecolor("#334155")
-                st.pyplot(fig, use_container_width=True)
-                plt.close()
-
-            st.divider()
-
-            # ── Gauge — margin of safety ─────────────────────────────────────
-            st.markdown('<div class="section-header">📉 Price vs Intrinsic Value</div>', unsafe_allow_html=True)
-
-            fig2, ax2 = plt.subplots(figsize=(9, 1.8))
-            fig2.patch.set_facecolor("#1E293B")
-            ax2.set_facecolor("#1E293B")
-
-            low  = min(market_price, intrinsic) * 0.85
-            high = max(market_price, intrinsic) * 1.15
-            ax2.set_xlim(low, high)
-
-            ax2.barh(0, market_price - low, left=low, height=0.4, color="#2A4494", label=f"Market: ${market_price:.2f}")
-            ax2.barh(0, intrinsic - low,    left=low, height=0.15, color="#02C39A", label=f"Intrinsic: ${intrinsic:.2f}")
-            ax2.axvline(market_price, color="#F9C846", linewidth=2, linestyle="--")
-            ax2.axvline(intrinsic,    color="#02C39A", linewidth=2)
-            ax2.set_yticks([])
-            ax2.tick_params(colors="#CADCFC", labelsize=9)
-            ax2.spines[:].set_visible(False)
-            ax2.legend(facecolor="#0D1B2A", labelcolor="#CADCFC", fontsize=9, loc="upper right")
-            st.pyplot(fig2, use_container_width=True)
-            plt.close()
-
-else:
-    st.info("👈  Enter a ticker and market price in the sidebar, then click **Predict Intrinsic Value**.")
-
-    st.markdown("### How It Works")
-    steps = [
-        ("1️⃣  Enter Ticker", "Type in any U.S. listed stock ticker (e.g. AAPL, MSFT, TSLA)."),
-        ("2️⃣  Data Fetching", "The app pulls annual filings directly from SEC EDGAR (10-K/10-Q) and macro indicators from the BLS API."),
-        ("3️⃣  Feature Engineering", "11 features are computed: P/E Ratio, ROE, ROA, Debt/Equity, FCF Yield, Profit Margin, Revenue Growth, Asset Turnover, CPI, Unemployment, and Market Price."),
-        ("4️⃣  XGBoost Prediction", "A trained XGBoost Regressor returns the predicted intrinsic value based on the feature set."),
-        ("5️⃣  Valuation Signal", "If intrinsic value > market price by >15% → Undervalued. If <-15% → Overvalued. Otherwise → Fairly Valued."),
+if not analysis:
+    st.info("👈  Enter a ticker in the sidebar and click **Analyze** to begin.")
+    st.markdown("### What's inside")
+    cols = st.columns(3)
+    cards = [
+        ("🔍 Explainable AI", "SHAP / LIME waterfalls show exactly how each feature moved the valuation."),
+        ("📊 Valuation Range", "Quantile XGBoost + Monte-Carlo give an intrinsic-value range, not a single point."),
+        ("🌐 Live Pipelines", "yfinance prices, FRED macro (yield curve, CPI, rates), FinBERT sentiment."),
+        ("🧮 DCF & Scenario", "Interactive DCF with WACC / terminal-growth sliders, Monte-Carlo fair value."),
+        ("🏦 Peer Benchmarking", "EV/EBITDA, P/E, Debt/Equity vs auto-selected industry peers."),
+        ("📄 PDF Reports", "One-click equity research summary with feature impacts and signals."),
     ]
-    for title, body in steps:
-        with st.expander(title):
-            st.write(body)
+    for i, (t, b) in enumerate(cards):
+        with cols[i % 3]:
+            st.markdown(f"**{t}**")
+            st.caption(b)
+    st.stop()
+
+
+# Unpack analysis
+tk = analysis["ticker"]
+price = analysis["price"]
+md: market_mod.MarketData = analysis["md"]
+feats = analysis["features"]
+raw = feats["_raw"]
+result: val_mod.ValuationResult = analysis["result"]
+attribution: explain_mod.Attribution = analysis["attribution"]
+signal_text = analysis["signal_text"]
+signal_class = analysis["signal_class"]
+
+st.markdown(
+    f"### {raw.get('name', tk)} ({tk}) "
+    f"{theme.source_pill(md.is_live, f'{md.source.upper()} LIVE', 'OFFLINE')}",
+    unsafe_allow_html=True,
+)
+
+# ── Headline metric row ───────────────────────────────────────────────────────
+h1, h2, h3, h4 = st.columns(4)
+h1.markdown(metric_card("Intrinsic Value (point)", f"${result.point:.2f}"), unsafe_allow_html=True)
+h2.markdown(metric_card("Intrinsic Range (p10–p90)", f"${result.low:.0f} – ${result.high:.0f}", sub=True),
+            unsafe_allow_html=True)
+h3.markdown(metric_card("Market Price", f"${price:.2f}"), unsafe_allow_html=True)
+h4.markdown(
+    f'<div class="metric-card"><div class="metric-label">Valuation Signal</div>'
+    f'<div class="{signal_class}">{signal_text}</div></div>',
+    unsafe_allow_html=True,
+)
+
+st.divider()
+
+tabs = st.tabs([
+    "📊 Valuation", "🔍 Explainability", "🧮 DCF & Scenario",
+    "🏦 Peers", "📉 Backtesting", "📄 Report",
+])
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — VALUATION
+# ══════════════════════════════════════════════════════════════════════════════
+with tabs[0]:
+    left, right = st.columns([1.1, 1])
+
+    with left:
+        st.markdown('<div class="section-header">📋 Extracted Features</div>', unsafe_allow_html=True)
+        disp = {}
+        pct_feats = {"roe", "roa", "fcf_yield", "profit_margin", "revenue_yoy",
+                     "revenue_qoq", "net_income_yoy", "fcf_yoy"}
+        for key in ["pe_ratio", "roe", "roa", "debt_to_equity", "fcf_yield", "profit_margin",
+                    "asset_turnover", "revenue_yoy", "revenue_qoq", "net_income_yoy", "fcf_yoy",
+                    "sentiment", "cpi", "fed_funds", "yield_curve"]:
+            v = feats.get(key)
+            label = FEATURE_LABELS.get(key, key)
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                disp[label] = "N/A"
+            elif key in pct_feats:
+                disp[label] = f"{v*100:.1f}%"
+            else:
+                disp[label] = f"{v:.2f}"
+        feat_df = pd.DataFrame(disp.items(), columns=["Feature", "Value"])
+        st.dataframe(feat_df, use_container_width=True, hide_index=True, height=430)
+
+        sent_obj = raw.get("sentiment_obj")
+        if sent_obj is not None:
+            st.caption(
+                f"🗣️ Earnings sentiment: **{sent_obj.label}** ({sent_obj.score:+.2f}) "
+                f"via {sent_obj.source}"
+            )
+
+    with right:
+        st.markdown('<div class="section-header">📊 Intrinsic Value Distribution</div>', unsafe_allow_html=True)
+        fig, ax = plt.subplots(figsize=(5.5, 3.6))
+        theme.style_axes(fig, ax)
+        ax.hist(result.mc_samples, bins=40, color=theme.TEAL, alpha=0.7, edgecolor="none")
+        ax.axvline(result.point, color=theme.GREEN, lw=2, label=f"Point ${result.point:.0f}")
+        ax.axvline(result.low, color=theme.YELLOW, lw=1.5, ls="--", label=f"p10 ${result.low:.0f}")
+        ax.axvline(result.high, color=theme.YELLOW, lw=1.5, ls="--", label=f"p90 ${result.high:.0f}")
+        ax.axvline(price, color=theme.RED, lw=2, label=f"Market ${price:.0f}")
+        ax.set_xlabel("Intrinsic Value ($)")
+        ax.set_ylabel("Monte-Carlo frequency")
+        ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=7.5)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+        st.markdown(
+            f"**Confidence interval:** \\${result.low:.2f} – \\${result.high:.2f} "
+            f"(width {result.ci_width_pct:.1f}% of point). "
+            f"Monte-Carlo mean \\${result.mc_mean:.2f} ± \\${result.mc_std:.2f}."
+        )
+
+    st.markdown('<div class="section-header">📉 Price vs Intrinsic Range</div>', unsafe_allow_html=True)
+    fig2, ax2 = plt.subplots(figsize=(9, 1.9))
+    theme.style_axes(fig2, ax2)
+    lo = min(price, result.low) * 0.9
+    hi = max(price, result.high) * 1.1
+    ax2.set_xlim(lo, hi)
+    ax2.barh(0, result.high - result.low, left=result.low, height=0.35, color=theme.TEAL,
+             alpha=0.5, label=f"Intrinsic range ${result.low:.0f}–${result.high:.0f}")
+    ax2.axvline(result.point, color=theme.GREEN, lw=2.5, label=f"Point ${result.point:.2f}")
+    ax2.axvline(price, color=theme.RED, lw=2.5, ls="--", label=f"Market ${price:.2f}")
+    ax2.set_yticks([])
+    ax2.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8.5, loc="upper right")
+    st.pyplot(fig2, use_container_width=True)
+    plt.close(fig2)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — EXPLAINABILITY (SHAP / LIME)
+# ══════════════════════════════════════════════════════════════════════════════
+with tabs[1]:
+    st.markdown(
+        f'<div class="section-header">🔍 Feature Attribution '
+        f'({"SHAP" if attribution.source=="shap" else "XGBoost contributions"})</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "How each feature pushed the valuation away from the model's base value "
+        f"(**${attribution.base_value:.2f}**) toward the final prediction "
+        f"(**${attribution.prediction:.2f}**). Green = pushed value up, red = down."
+    )
+
+    adf = attribution.as_frame()
+    wcol, tcol = st.columns([1.3, 1])
+
+    with wcol:
+        # SHAP-style waterfall.
+        top = adf.head(10).iloc[::-1].reset_index(drop=True)
+        fig, ax = plt.subplots(figsize=(6.4, 4.6))
+        theme.style_axes(fig, ax)
+        cum = attribution.base_value
+        for _, r in top.iterrows():
+            c = theme.GREEN if r["contribution"] >= 0 else theme.RED
+            ax.barh(r["feature"], r["contribution"], left=cum, color=c, edgecolor="none")
+            cum += r["contribution"]
+        ax.axvline(attribution.base_value, color=theme.MUTED, ls=":", lw=1, label="Base value")
+        ax.axvline(attribution.prediction, color=theme.YELLOW, lw=1.5, label="Prediction")
+        ax.set_xlabel("Intrinsic Value ($) contribution")
+        ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+    with tcol:
+        show = adf.copy()
+        show["contribution"] = show["contribution"].map(lambda x: f"{x:+.2f}")
+        show["value"] = show["value"].map(lambda x: f"{x:.2f}" if isinstance(x, (int, float)) else x)
+        st.dataframe(show, use_container_width=True, hide_index=True, height=430)
+
+    # Optional LIME.
+    st.markdown('<div class="section-header">🍋 LIME Local Explanation</div>', unsafe_allow_html=True)
+    if explain_mod.has_lime():
+        with st.spinner("Computing LIME explanation..."):
+            lime_df = explain_mod.lime_explanation(feats, vm)
+        if lime_df is not None:
+            st.dataframe(lime_df, use_container_width=True, hide_index=True)
+        else:
+            st.caption("LIME explanation unavailable for this instance.")
+    else:
+        st.caption(
+            "LIME is not installed in this environment — install `lime` to enable a second "
+            "local explainer. SHAP attributions above provide the primary explanation."
+        )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — DCF & SCENARIO
+# ══════════════════════════════════════════════════════════════════════════════
+with tabs[2]:
+    st.markdown('<div class="section-header">🧮 Discounted Cash Flow — Interactive</div>', unsafe_allow_html=True)
+    st.caption("Adjust the assumptions; the DCF and its Monte-Carlo distribution update live.")
+
+    fcf0 = raw.get("free_cash_flow") or raw.get("op_cash_flow") or 1e9
+    shares = raw.get("shares") or 1e9
+    net_debt = (raw.get("long_term_debt") or 0.0)
+
+    c1, c2, c3, c4 = st.columns(4)
+    wacc = c1.slider("WACC (%)", 4.0, 20.0, 9.0, 0.25) / 100
+    tgrowth = c2.slider("Terminal growth (%)", 0.0, 5.0, 2.5, 0.1) / 100
+    ngrowth = c3.slider("Near-term FCF growth (%)", -10.0, 40.0, 8.0, 0.5) / 100
+    years = c4.slider("Projection years", 3, 10, 5, 1)
+
+    dcf_in = dcf_mod.DCFInputs(
+        fcf0=float(fcf0), shares=float(shares), net_debt=float(net_debt),
+        wacc=wacc, terminal_growth=tgrowth, growth_rate=ngrowth, years=int(years),
+    )
+    dcf_res = dcf_mod.run_dcf(dcf_in)
+    dcf_mc = dcf_mod.monte_carlo_dcf(dcf_in, n=4000)
+
+    d1, d2, d3, d4 = st.columns(4)
+    d1.markdown(metric_card("DCF Intrinsic / Share", f"${dcf_res.intrinsic_per_share:.2f}"), unsafe_allow_html=True)
+    d2.markdown(metric_card("DCF Range (p10–p90)",
+                            f"${dcf_mc['p10']:.0f} – ${dcf_mc['p90']:.0f}", sub=True), unsafe_allow_html=True)
+    d3.markdown(metric_card("ML Intrinsic (point)", f"${result.point:.2f}"), unsafe_allow_html=True)
+    d4.markdown(metric_card("Market Price", f"${price:.2f}"), unsafe_allow_html=True)
+
+    g1, g2 = st.columns(2)
+    with g1:
+        st.markdown('<div class="section-header">Projected vs Discounted FCF</div>', unsafe_allow_html=True)
+        fig, ax = plt.subplots(figsize=(5.4, 3.4))
+        theme.style_axes(fig, ax)
+        yrs = list(range(1, int(years) + 1))
+        w = 0.4
+        ax.bar([y - w / 2 for y in yrs], np.array(dcf_res.projected_fcf) / 1e9, width=w,
+               color=theme.TEAL, label="Projected FCF")
+        ax.bar([y + w / 2 for y in yrs], np.array(dcf_res.discounted_fcf) / 1e9, width=w,
+               color=theme.GREEN, label="Discounted (PV)")
+        ax.set_xlabel("Year"); ax.set_ylabel("FCF ($B)")
+        ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
+        st.pyplot(fig, use_container_width=True); plt.close(fig)
+
+    with g2:
+        st.markdown('<div class="section-header">Monte-Carlo Fair-Value Distribution</div>', unsafe_allow_html=True)
+        fig, ax = plt.subplots(figsize=(5.4, 3.4))
+        theme.style_axes(fig, ax)
+        ax.hist(dcf_mc["samples"], bins=45, color=theme.BLUE, alpha=0.75, edgecolor="none")
+        ax.axvline(dcf_mc["median"], color=theme.GREEN, lw=2, label=f"Median ${dcf_mc['median']:.0f}")
+        ax.axvline(price, color=theme.RED, lw=2, ls="--", label=f"Market ${price:.0f}")
+        ax.set_xlabel("Fair value / share ($)"); ax.set_ylabel("Frequency")
+        ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
+        st.pyplot(fig, use_container_width=True); plt.close(fig)
+
+    st.caption(
+        "Hybrid view: the ML model and traditional DCF are independent estimates. "
+        "Agreement between them strengthens the valuation thesis; divergence flags "
+        "assumptions worth revisiting."
+    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — PEERS
+# ══════════════════════════════════════════════════════════════════════════════
+with tabs[3]:
+    st.markdown('<div class="section-header">🏦 Peer Group Benchmarking</div>', unsafe_allow_html=True)
+    self_metrics = {
+        "name": raw.get("name", tk),
+        "pe": feats.get("pe_ratio"),
+        "debt_to_equity": feats.get("debt_to_equity"),
+        "profit_margin": feats.get("profit_margin"),
+        "market_cap": raw.get("market_cap"),
+        "ps": (raw.get("market_cap") / raw["revenue"]) if raw.get("revenue") else None,
+        "ev_ebitda": None,
+        "source": "SEC",
+    }
+    with st.spinner("Fetching peer multiples..."):
+        pdf = peers_mod.benchmark(tk, sector=raw.get("sector"), self_metrics=self_metrics)
+
+    styled = pdf.copy()
+    for col in ["EV/EBITDA", "P/E", "Debt/Equity", "P/S", "Market Cap ($B)"]:
+        styled[col] = styled[col].map(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+    styled["Profit Margin"] = styled["Profit Margin"].map(lambda x: f"{x*100:.1f}%" if pd.notna(x) else "N/A")
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    summ = peers_mod.peer_summary(pdf)
+    st.markdown('<div class="section-header">Relative Positioning vs Peer Median</div>', unsafe_allow_html=True)
+    metric_cols = st.columns(len(summ) or 1)
+    for i, (metric, d) in enumerate(summ.items()):
+        with metric_cols[i]:
+            if d["subject"] is None or d["premium_pct"] is None:
+                st.metric(metric, "N/A")
+            else:
+                st.metric(
+                    metric, f"{d['subject']:.2f}",
+                    delta=f"{d['premium_pct']:+.0f}% vs peers",
+                    delta_color="inverse" if metric in ("EV/EBITDA", "P/E", "Debt/Equity", "P/S") else "normal",
+                )
+
+    # Peer bar chart for EV/EBITDA & P/E.
+    fig, ax = plt.subplots(figsize=(9, 3.2))
+    theme.style_axes(fig, ax)
+    plot_df = pdf.dropna(subset=["P/E"]).head(8)
+    x = np.arange(len(plot_df))
+    ax.bar(x - 0.2, plot_df["P/E"], width=0.4, color=theme.TEAL, label="P/E")
+    ax.bar(x + 0.2, plot_df["EV/EBITDA"], width=0.4, color=theme.GREEN, label="EV/EBITDA")
+    ax.set_xticks(x); ax.set_xticklabels(plot_df["Ticker"], fontsize=8)
+    ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
+    st.pyplot(fig, use_container_width=True); plt.close(fig)
+    st.caption(f"Peers auto-selected for **{tk}** (sector: {raw.get('sector') or 'n/a'}). "
+               "Multiples marked *estimated* when live data was unavailable.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — BACKTESTING
+# ══════════════════════════════════════════════════════════════════════════════
+with tabs[4]:
+    st.markdown('<div class="section-header">📉 Historical Backtesting Engine</div>', unsafe_allow_html=True)
+    st.caption(
+        "How the valuation signal would have performed against actual price moves over "
+        "1-, 3- and 5-year forward horizons (monthly rebalances). "
+        f"Price history source: **{md.source}**."
+    )
+
+    results = bt_mod.run_backtest(md.history)
+    if not results:
+        st.warning("Not enough price history to backtest this ticker.")
+    else:
+        cols = st.columns(len(results))
+        for i, r in enumerate(results):
+            with cols[i]:
+                st.metric(
+                    f"{int(r.horizon_years)}-Year Hit Rate", f"{r.hit_rate*100:.0f}%",
+                    delta=f"{r.n_signals} signals", delta_color="off",
+                )
+                st.caption(f"Avg fwd return after BUY: {r.avg_forward_return*100:+.1f}%")
+
+        curve = bt_mod.equity_curve(md.history)
+        if curve is not None:
+            st.markdown('<div class="section-header">Strategy vs Buy & Hold (growth of $1)</div>',
+                        unsafe_allow_html=True)
+            fig, ax = plt.subplots(figsize=(9, 3.6))
+            theme.style_axes(fig, ax)
+            ax.plot(curve.index, curve["Buy & Hold"], color=theme.MUTED, lw=1.5, label="Buy & Hold")
+            ax.plot(curve.index, curve["Valuation Strategy"], color=theme.GREEN, lw=1.8,
+                    label="Valuation Strategy (long when undervalued)")
+            ax.set_ylabel("Growth of $1")
+            ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8.5)
+            st.pyplot(fig, use_container_width=True); plt.close(fig)
+        st.caption(
+            "Note: point-in-time fundamentals aren't stored, so the backtest uses a "
+            "mean-reversion intrinsic-value proxy (trailing average) to evaluate signal "
+            "quality — a conservative stand-in for the full ML signal history."
+        )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — REPORT
+# ══════════════════════════════════════════════════════════════════════════════
+with tabs[5]:
+    st.markdown('<div class="section-header">📄 One-Click Equity Research Report</div>', unsafe_allow_html=True)
+    st.caption(
+        "Generate a formatted PDF summary: ticker breakdown, valuation range, signal, "
+        "SHAP feature impacts, DCF and peer multiples."
+    )
+
+    include_dcf = st.checkbox("Include DCF section", value=True)
+    include_peers = st.checkbox("Include peer benchmarking", value=True)
+
+    if st.button("🧾 Generate Report", type="primary"):
+        with st.spinner("Building report..."):
+            dcf_payload = None
+            if include_dcf:
+                _d = dcf_mod.run_dcf(dcf_mod.DCFInputs(
+                    fcf0=float(raw.get("free_cash_flow") or raw.get("op_cash_flow") or 1e9),
+                    shares=float(raw.get("shares") or 1e9),
+                    net_debt=float(raw.get("long_term_debt") or 0.0),
+                ))
+                dcf_payload = {"intrinsic_per_share": _d.intrinsic_per_share}
+
+            peers_payload = None
+            if include_peers:
+                peers_payload = peers_mod.benchmark(
+                    tk, sector=raw.get("sector"),
+                    self_metrics={"name": raw.get("name", tk), "pe": feats.get("pe_ratio"),
+                                  "debt_to_equity": feats.get("debt_to_equity"),
+                                  "profit_margin": feats.get("profit_margin"),
+                                  "market_cap": raw.get("market_cap"), "source": "SEC"},
+                )
+
+            pdf_bytes = reports.build_report(
+                ticker=tk,
+                company=raw.get("name", tk),
+                market_price=price,
+                valuation={"point": result.point, "low": result.low,
+                           "median": result.median, "high": result.high},
+                signal_text=signal_text,
+                attribution=attribution.as_frame(),
+                dcf=dcf_payload,
+                peers=peers_payload,
+                macro={"cpi": macro_now.cpi, "fed_funds": macro_now.fed_funds,
+                       "yield_curve": macro_now.yield_curve_10y_2y},
+            )
+
+        ext = "pdf" if reports.has_reportlab() else "txt"
+        mime = "application/pdf" if ext == "pdf" else "text/plain"
+        st.success(f"Report ready ({len(pdf_bytes):,} bytes).")
+        st.download_button(
+            f"⬇️ Download {tk} Equity Report (.{ext})",
+            data=pdf_bytes,
+            file_name=f"{tk}_equity_report.{ext}",
+            mime=mime,
+            type="primary",
+        )
+        if ext == "txt":
+            st.caption("ReportLab not installed — generated a plain-text report instead of PDF.")
