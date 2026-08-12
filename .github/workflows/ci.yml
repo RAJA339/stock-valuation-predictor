@@ -1,10 +1,17 @@
 name: CI
 
+# NOTE: GitHub Actions only reads workflows from `.github/workflows/` at the
+# repository ROOT. This project lives under OneDrive/Desktop/stock-valuation-predictor/,
+# so every step sets `working-directory` to that subfolder.
+
 on:
   push:
     branches: ["**"]
   pull_request:
     branches: ["**"]
+
+env:
+  PROJECT_DIR: OneDrive/Desktop/stock-valuation-predictor
 
 jobs:
   smoke-test:
@@ -28,6 +35,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: OneDrive/Desktop/stock-valuation-predictor/requirements.txt
 
       - name: Install dependencies
         run: |
@@ -37,7 +45,7 @@ jobs:
       - name: Byte-compile all sources
         run: |
           python -m py_compile app.py
-          python -m compileall -q svp
+          python -m compileall -q svp ci
 
       - name: Import the svp package
         run: python -c "import svp; print('svp', svp.__version__)"
