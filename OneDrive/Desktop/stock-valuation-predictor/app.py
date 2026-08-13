@@ -993,15 +993,57 @@ with tabs[9]:
         projected_ST = st.number_input("Projected Sₜ ($)", value=float(round(default_target, 2)),
                                        min_value=0.01, step=1.0, key="bridge_target")
 
+    b3, b4 = st.columns([1, 1])
+    with b3:
+        convergence = st.slider(
+            "Gap to fair value closed by expiry", 0.0, 1.0, 1.0, 0.05, key="bridge_conv",
+            help="How much of the spot→target gap you assume the market closes by "
+                 "expiry. 1.0 = fully re-rated; 0.0 = no re-rating at all.",
+        )
+    with b4:
+        scan_vol = st.slider(
+            "Terminal volatility σ (%)", 5.0, 120.0, float(round(vol_in * 100, 1)), 0.5,
+            key="bridge_vol",
+            help="Diffusion applied around each fair-value draw. Defaults to the "
+                 "pricer's σ; the chain's ATM implied vol is a reasonable choice.",
+        ) / 100.0
+
     st.markdown(
         f"Projected **Sₜ = ${projected_ST:,.2f}** vs spot **${spot:,.2f}** "
         f"→ implied move **{(projected_ST / spot - 1) * 100:+.1f}%** over {T_exp * 365:.0f} days."
     )
 
+    # Recentre the model's Monte-Carlo intrinsic draws on the chosen target so
+    # the distribution keeps the model's dispersion while honouring the target
+    # the user actually selected.
+    _mc = np.asarray(result.mc_samples, dtype=float)
+    _mc = _mc[np.isfinite(_mc)]
+    if _mc.size and _mc.mean() > 0:
+        value_samples = _mc * (projected_ST / _mc.mean())
+    else:
+        value_samples = np.array([projected_ST])
+
+    terminal = deriv_mod.terminal_distribution(
+        spot=spot, value_samples=value_samples, T=T_exp,
+        sigma=scan_vol, convergence=convergence,
+    )
+
+    if terminal.size:
+        t1, t2, t3, t4 = st.columns(4)
+        t1.markdown(metric_card("E[Sₜ]", f"${terminal.mean():,.2f}"), unsafe_allow_html=True)
+        t2.markdown(metric_card("Sₜ p10–p90",
+                                f"${np.percentile(terminal, 10):,.0f} – ${np.percentile(terminal, 90):,.0f}",
+                                sub=True), unsafe_allow_html=True)
+        t3.markdown(metric_card("P(Sₜ > spot)", f"{(terminal > spot).mean() * 100:.1f}%", sub=True),
+                    unsafe_allow_html=True)
+        t4.markdown(metric_card("Risk-neutral E[Sₜ]",
+                                f"${spot * float(np.exp(rf_rate * T_exp)):,.2f}", sub=True),
+                    unsafe_allow_html=True)
+
     side = "call" if projected_ST >= spot else "put"
     scan_df = chain.calls if side == "call" else chain.puts
     rows = []
-    if not scan_df.empty:
+    if not scan_df.empty and terminal.size:
         for _, r_ in scan_df.iterrows():
             mkt = float(r_.get("lastPrice") or 0.0)
             if mkt <= 0:
@@ -1013,19 +1055,22 @@ with tabs[9]:
             # Quoted IV may be NaN — either absent, or rejected and unsolvable
             # by the chain loader. Never let that reach the pricer as sigma.
             _iv = r_.get("impliedVolatility")
-            iv_row = float(_iv) if (_iv is not None and pd.notna(_iv) and _iv > 0) else vol_in
-            e = deriv_mod.bridge_call_edge(
-                projected_ST=projected_ST, strike=k, T=T_exp, r=rf_rate,
-                market_price=mkt, sigma=iv_row, spot=spot, kind=side,
+            iv_row = float(_iv) if (_iv is not None and pd.notna(_iv) and _iv > 0) else None
+            e = deriv_mod.bridge_edge_mc(
+                terminal=terminal, strike=k, T=T_exp, r=rf_rate,
+                market_price=mkt, spot=spot, kind=side, market_iv=iv_row,
             )
             rows.append({
                 "Strike": k,
                 "Premium": round(mkt, 2),
-                "IV %": round(iv_row * 100, 1),
-                "P(ITM) at target": round(e.prob_itm, 3) if e.prob_itm == e.prob_itm else None,
-                "PV of payoff @ Sₜ": round(e.expected_payoff * float(np.exp(-rf_rate * T_exp)), 2),
+                "IV %": round(iv_row * 100, 1) if iv_row else None,
+                "P(ITM)": round(e.prob_itm, 3),
+                "E[payoff] PV": round(e.expected_payoff_pv, 2),
+                "Median payoff": round(e.payoff_p50, 2),
+                "Risk-neutral": round(e.risk_neutral_price, 2) if e.risk_neutral_price == e.risk_neutral_price else None,
                 "Edge ($)": round(e.edge, 2),
                 "Edge (x premium)": round(e.edge / mkt, 2) if mkt else None,
+                "View premium": round(e.view_premium, 2) if e.view_premium == e.view_premium else None,
                 "Verdict": e.verdict,
             })
 
@@ -1033,15 +1078,21 @@ with tabs[9]:
         edge_df = pd.DataFrame(rows).sort_values("Edge ($)", ascending=False)
         best = edge_df.iloc[0]
         st.success(
-            f"Best **{side}** by model edge: strike **${best['Strike']:.2f}** — "
-            f"premium **${best['Premium']:.2f}**, edge **${best['Edge ($)']:.2f}** "
+            f"Best **{side}** by expected edge: strike **${best['Strike']:.2f}** — "
+            f"premium **${best['Premium']:.2f}**, P(ITM) **{best['P(ITM)']:.1%}**, "
+            f"expected edge **${best['Edge ($)']:.2f}** "
             f"({best['Edge (x premium)']:.2f}× premium) — _{best['Verdict']}_."
         )
         st.dataframe(edge_df, width="stretch", hide_index=True, height=300)
         st.caption(
-            "⚠️ Edge is a point-estimate payoff at the projected target, not a risk-adjusted "
-            "expectation — it ignores the full terminal distribution and assumes the target "
-            "is reached exactly at expiry. Treat it as a screen, not a signal."
+            "Edge integrates the payoff across the projected terminal distribution "
+            "(model intrinsic draws re-centred on your target, diffused at σ), so it is a "
+            "genuine expectation rather than a payoff at one price. **It is still a "
+            "view-dependent number, not an arbitrage:** the distribution is real-world, "
+            "built from your valuation, while the premium is set off the risk-neutral law. "
+            "*View premium* isolates that — it compares the model PV against Black-Scholes "
+            "at the market's own IV, so a large edge with a small view premium means the "
+            "model is disagreeing about volatility, not direction."
         )
     else:
         st.info("No priced contracts available on this chain to score.")
@@ -1098,7 +1149,13 @@ with tabs[9]:
             "best_premium": float(best["Premium"]),
             "best_edge": float(best["Edge ($)"]),
             "best_verdict": str(best["Verdict"]),
+            "best_prob_itm": float(best["P(ITM)"]),
+            "edge_method": "Monte-Carlo over projected terminal distribution",
+            "convergence": convergence,
+            "terminal_vol": scan_vol,
         })
+        if best["View premium"] is not None and best["View premium"] == best["View premium"]:
+            _opt_summary["best_view_premium"] = float(best["View premium"])
     st.session_state["rep_options"] = _opt_summary
 
 
