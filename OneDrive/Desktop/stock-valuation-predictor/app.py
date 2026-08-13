@@ -9,6 +9,9 @@ fundamentals, live market data, real-time macro indicators and earnings-call
 sentiment, then explains and stress-tests that prediction.
 
 Feature areas (each in its own tab):
+  0. Charts           — TradingView + native candles at 5/10/15/30m and 1h, an
+                        11-indicator panel, and each indicator's *measured* hit
+                        rate on those bars (no accuracy is asserted, only observed)
   1. Valuation        — XGBoost point estimate + quantile intrinsic-value range
   2. Explainability   — SHAP / LIME per-feature attribution (waterfall)
   3. DCF & Scenario   — interactive DCF (WACC / terminal-growth sliders) + Monte-Carlo
@@ -20,7 +23,8 @@ Feature areas (each in its own tab):
   9. Filings Δ        — TF-IDF divergence between consecutive 10-K / 10-Q filings
  10. Options & Futures— live chains, Black-Scholes Greeks, cost-of-carry, and a
                         bridge from the intrinsic target to mispriced contracts
- 11. Report           — one-click PDF equity research summary
+ 11. Report           — one-click PDF equity research summary, including the
+                        chart, indicator panel and measured accuracy table
 
 The heavy lifting lives in the ``svp`` package. Every data/ML dependency degrades
 gracefully, so the app runs even without network access or optional libraries.
@@ -54,9 +58,10 @@ from svp.models import (
 )
 from svp.analytics import (
     peers as peers_mod, technical as technical_mod, quality as quality_mod,
-    screener as screener_mod,
+    screener as screener_mod, indicators as ind_mod, accuracy as acc_mod,
 )
-from svp import reports
+from svp.data import intraday as intraday_mod
+from svp import reports, charts
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG + THEME
@@ -120,6 +125,26 @@ def get_quality_cached(cik: str, market_cap: float | None):
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_insider_cached(ticker: str, cik: str):
     return insider_mod.get_insider_signal(ticker, cik)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_intraday_cached(ticker: str, interval: str, spot: float):
+    return intraday_mod.get_intraday(ticker, interval, spot_fallback=spot)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_indicators_cached(ticker: str, interval: str, spot: float):
+    return ind_mod.compute(get_intraday_cached(ticker, interval, spot).df)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_accuracy_cached(ticker: str, interval: str, spot: float, horizon: int):
+    return acc_mod.measure(get_indicators_cached(ticker, interval, spot), horizon=horizon)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_chart_png_cached(ticker: str, interval: str, spot: float) -> bytes:
+    return charts.render(get_indicators_cached(ticker, interval, spot).df, ticker, interval)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -310,18 +335,28 @@ regime = analysis["regime"]
 technical = analysis["technical"]
 sizing = analysis["sizing"]
 
+# ── Quote header — the price block a brokerage app opens with ────────────────
+_day_change = None
+if not md.history.empty and len(md.history) > 1:
+    _prev = float(md.history["Close"].iloc[-2])
+    _day_change = (price - _prev) / _prev if _prev else None
+
 st.markdown(
-    f"### {raw.get('name', tk)} ({tk}) "
-    f"{theme.source_pill(md.is_live, f'{md.source.upper()} LIVE', 'OFFLINE')}"
-    f'&nbsp;<span class="pill {"pill-live" if regime.is_risk_on else "pill-offline"}">'
-    f"REGIME: {regime.regime}</span>",
+    theme.quote_header(
+        tk, raw.get("name", tk), price, _day_change,
+        pills=(theme.source_pill(md.is_live, f"{md.source.upper()} LIVE", "OFFLINE")
+               + f'&nbsp;<span class="pill '
+                 f'{"pill-live" if regime.is_risk_on else "pill-offline"}">'
+                 f"REGIME: {regime.regime}</span>"),
+    ),
     unsafe_allow_html=True,
 )
+st.write("")
 
 # ── Headline metric row ───────────────────────────────────────────────────────
 h1, h2, h3, h4 = st.columns(4)
-h1.markdown(metric_card("Intrinsic Value (point)", f"${result.point:.2f}"), unsafe_allow_html=True)
-h2.markdown(metric_card("Intrinsic Range (p10–p90)", f"${result.low:.0f} – ${result.high:.0f}", sub=True),
+h1.markdown(metric_card("Intrinsic Value", f"${result.point:.2f}"), unsafe_allow_html=True)
+h2.markdown(metric_card("Range (p10–p90)", f"${result.low:.0f} – ${result.high:.0f}", sub=True),
             unsafe_allow_html=True)
 h3.markdown(metric_card("Market Price", f"${price:.2f}"), unsafe_allow_html=True)
 h4.markdown(
@@ -333,7 +368,7 @@ h4.markdown(
 st.divider()
 
 tabs = st.tabs([
-    "📊 Valuation", "🔍 Explainability", "🧮 DCF & Scenario",
+    "📈 Charts", "📊 Valuation", "🔍 Explainability", "🧮 DCF & Scenario",
     "🏦 Peers", "📉 Backtesting",
     "🎯 Execution & Timing", "🛡️ Guardrails", "🔬 Screener", "📰 Filings Δ",
     "⚡ Options & Futures",
@@ -341,9 +376,144 @@ tabs = st.tabs([
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — VALUATION
+# TAB 1 — CHARTS (TradingView + native candles + measured indicator accuracy)
 # ══════════════════════════════════════════════════════════════════════════════
 with tabs[0]:
+    c1, c2, c3 = st.columns([1.4, 1, 1])
+    with c1:
+        tv_interval = st.radio(
+            "Interval", list(intraday_mod.INTERVALS.keys()),
+            index=2, horizontal=True, key="chart_interval",
+        )
+    with c2:
+        horizon_bars = st.selectbox(
+            "Accuracy horizon (bars forward)", [3, 6, 12, 24], index=1, key="chart_horizon",
+            help="How far ahead a signal is scored. 6 bars is 30 minutes at 5m, 6 hours at 1h.",
+        )
+    with c3:
+        chart_style = st.radio("Chart", ["TradingView", "Native"], horizontal=True,
+                               key="chart_style")
+
+    bars = get_intraday_cached(tk, tv_interval, price)
+    iset = get_indicators_cached(tk, tv_interval, price)
+    acc_rows = get_accuracy_cached(tk, tv_interval, price, int(horizon_bars))
+    acc_sum = acc_mod.summary(acc_rows)
+
+    if not bars.is_live:
+        st.warning(
+            f"⚠️ Intraday candles are **simulated**, not market data — the live feed "
+            f"was unavailable, so the bars, indicators and hit rates below describe a "
+            f"synthetic series.\n\nReason: `{bars.reason or 'unknown'}`"
+        )
+
+    # ── Quote strip ──────────────────────────────────────────────────────────
+    last = bars.last_price or price
+    chg = bars.session_change or 0.0
+    q1, q2, q3, q4, q5 = st.columns(5)
+    q1.markdown(metric_card("Last", f"${last:,.2f}"), unsafe_allow_html=True)
+    q2.markdown(
+        f'<div class="metric-card"><div class="metric-label">Change (window)</div>'
+        f'<div class="{"signal-under" if chg >= 0 else "signal-over"}">{chg * 100:+.2f}%</div></div>',
+        unsafe_allow_html=True)
+    q3.markdown(metric_card("Consensus", iset.consensus, sub=True), unsafe_allow_html=True)
+    q4.markdown(metric_card("Bull / Bear", f"{iset.bullish} / {iset.bearish}", sub=True),
+                unsafe_allow_html=True)
+    q5.markdown(metric_card("Bars", f"{len(bars.df):,}", sub=True), unsafe_allow_html=True)
+
+    # ── Chart ────────────────────────────────────────────────────────────────
+    if chart_style == "TradingView":
+        tv_map = {"5m": "5", "10m": "10", "15m": "15", "30m": "30", "1h": "60"}
+        st.components.v1.html(f"""
+<div class="tradingview-widget-container" style="height:620px">
+  <div id="tv_chart" style="height:620px"></div>
+</div>
+<script src="https://s3.tradingview.com/tv.js"></script>
+<script>
+new TradingView.widget({{
+  "autosize": true, "symbol": "{tk}", "interval": "{tv_map[tv_interval]}",
+  "timezone": "America/New_York", "theme": "dark", "style": "1", "locale": "en",
+  "toolbar_bg": "#161B22", "enable_publishing": false, "hide_side_toolbar": false,
+  "allow_symbol_change": true, "withdateranges": true, "details": true,
+  "studies": ["MASimple@tv-basicstudies", "RSI@tv-basicstudies",
+              "MACD@tv-basicstudies", "VWAP@tv-basicstudies"],
+  "container_id": "tv_chart"
+}});
+</script>
+""", height=640)
+        st.caption(
+            "TradingView's own chart, with EMA, RSI, MACD and VWAP loaded. It renders in "
+            "your browser, so it needs internet access and **cannot be captured into the "
+            "PDF** — the report embeds the Native chart instead. "
+            f"TradingView has no 10-minute interval; at 10m it shows {tv_map[tv_interval]}m "
+            "while the native chart and every indicator below use true resampled 10m bars."
+            if tv_interval == "10m" else
+            "TradingView's own chart, with EMA, RSI, MACD and VWAP loaded. It renders in "
+            "your browser, so it needs internet access and **cannot be captured into the "
+            "PDF** — the report embeds the Native chart instead."
+        )
+    else:
+        png = charts.render(iset.df, tk, tv_interval)
+        if png:
+            st.image(png, width="stretch")
+            st.caption("Native chart — this is exactly what goes into the PDF report.")
+
+    st.divider()
+
+    # ── Indicator panel ──────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">📶 Indicator Panel</div>', unsafe_allow_html=True)
+    ic1, ic2 = st.columns([1.6, 1])
+    with ic1:
+        st.dataframe(iset.as_frame(), width="stretch", hide_index=True, height=420)
+    with ic2:
+        strip = charts.signal_strip(iset)
+        if strip:
+            st.image(strip, width="stretch")
+        st.metric("Net score", f"{iset.net_score:+.2f}",
+                  help="Mean of +1 bullish / 0 neutral / −1 bearish across all indicators")
+        st.caption(
+            f"**{iset.bullish}** bullish · **{iset.neutral}** neutral · "
+            f"**{iset.bearish}** bearish across {len(iset.signals)} indicators."
+        )
+
+    st.divider()
+
+    # ── Measured accuracy ────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">🎯 Measured Signal Accuracy</div>',
+                unsafe_allow_html=True)
+    st.caption(
+        f"Each indicator's call is recomputed at every one of the {len(bars.df):,} bars and "
+        f"scored against the actual move {horizon_bars} bars later. These are realised hit "
+        f"rates on **{tk} at {tv_interval}** — not vendor claims."
+    )
+
+    if acc_rows:
+        a1, a2, a3 = st.columns(3)
+        a1.markdown(metric_card("Best measured", acc_sum["best"] or "—", sub=True),
+                    unsafe_allow_html=True)
+        a2.markdown(metric_card("Best hit rate",
+                                f"{acc_sum['best_rate'] * 100:.1f}%"
+                                if acc_sum["best_rate"] == acc_sum["best_rate"] else "—"),
+                    unsafe_allow_html=True)
+        a3.markdown(metric_card("Beat chance (95% CI)",
+                                f"{acc_sum['better_than_chance']} of {acc_sum['measured']}", sub=True),
+                    unsafe_allow_html=True)
+        st.dataframe(acc_mod.as_frame(acc_rows), width="stretch", hide_index=True, height=400)
+        st.info(
+            "**How to read this.** *Verdict* is decided by the 95% confidence interval, not the "
+            "point estimate — an indicator scoring 56% on 200 signals has a CI of roughly 49–63%, "
+            "which includes a coin flip, so it is reported as no better than chance. Costs are "
+            "not modelled either: spread and commission can turn a genuine directional edge into "
+            "a loss. Nothing here is an 80%-accurate signal, and any product advertising one is "
+            "not measuring it this way."
+        )
+    else:
+        st.info("Not enough bars at this interval to measure accuracy.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — VALUATION
+# ══════════════════════════════════════════════════════════════════════════════
+with tabs[1]:
     left, right = st.columns([1.1, 1])
 
     with left:
@@ -411,7 +581,7 @@ with tabs[0]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — EXPLAINABILITY (SHAP / LIME)
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[1]:
+with tabs[2]:
     st.markdown(
         f'<div class="section-header">🔍 Feature Attribution '
         f'({"SHAP" if attribution.source=="shap" else "XGBoost contributions"})</div>',
@@ -467,7 +637,7 @@ with tabs[1]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — DCF & SCENARIO
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[2]:
+with tabs[3]:
     st.markdown('<div class="section-header">🧮 Discounted Cash Flow — Interactive</div>', unsafe_allow_html=True)
     st.caption("Adjust the assumptions; the DCF and its Monte-Carlo distribution update live.")
 
@@ -532,7 +702,7 @@ with tabs[2]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — PEERS
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[3]:
+with tabs[4]:
     st.markdown('<div class="section-header">🏦 Peer Group Benchmarking</div>', unsafe_allow_html=True)
     self_metrics = {
         "name": raw.get("name", tk),
@@ -583,7 +753,7 @@ with tabs[3]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 5 — BACKTESTING
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[4]:
+with tabs[5]:
     st.markdown('<div class="section-header">📉 Historical Backtesting Engine</div>', unsafe_allow_html=True)
     st.caption(
         "How the valuation signal would have performed against actual price moves over "
@@ -625,7 +795,7 @@ with tabs[4]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 6 — EXECUTION & TIMING (regime + technical filters + sizing/risk floors)
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[5]:
+with tabs[6]:
     st.markdown('<div class="section-header">🌐 Macro Regime</div>', unsafe_allow_html=True)
     rc1, rc2, rc3, rc4 = st.columns(4)
     rc1.metric("Regime", regime.regime, help=f"Detected via {regime.source.upper()}")
@@ -703,7 +873,7 @@ with tabs[5]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 7 — GUARDRAILS (quality/distress scores + insider/short)
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[6]:
+with tabs[7]:
     st.markdown('<div class="section-header">🛡️ Value-Trap & Distress Guardrails</div>', unsafe_allow_html=True)
     st.caption("Forensic-accounting scores prevent the model from rating structurally "
                "broken companies as bargains.")
@@ -766,7 +936,7 @@ with tabs[6]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 8 — SCREENER (quantile ranking + relative return)
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[7]:
+with tabs[8]:
     st.markdown('<div class="section-header">🔬 Cross-Sectional Screener</div>', unsafe_allow_html=True)
     st.caption("Rank a universe by margin-of-safety (p50 vs price) and expected excess "
                "return; buys are flagged only in the top decile.")
@@ -810,7 +980,7 @@ with tabs[7]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 9 — FILINGS Δ (10-K/10-Q textual divergence)
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[8]:
+with tabs[9]:
     st.markdown('<div class="section-header">📰 Fundamental-Delta NLP</div>', unsafe_allow_html=True)
     st.caption("Cosine-similarity divergence between consecutive SEC filings flags rapid "
                "changes in risk-factor disclosures before the market digests them.")
@@ -855,7 +1025,7 @@ with tabs[8]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 10 — OPTIONS & FUTURES
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[9]:
+with tabs[10]:
     st.markdown('<div class="section-header">⚡ Live Option Chain</div>', unsafe_allow_html=True)
     st.caption(
         "Strikes, bid/ask, open interest and implied volatility pulled from "
@@ -1213,7 +1383,7 @@ with tabs[9]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 11 — REPORT
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[10]:
+with tabs[11]:
     st.markdown('<div class="section-header">📄 One-Click Equity Research Report</div>', unsafe_allow_html=True)
     st.caption(
         "Generate a formatted PDF covering every tab: valuation range and signal, "
@@ -1227,6 +1397,7 @@ with tabs[10]:
         "Peer benchmarking", "Backtest", "Execution & timing",
         "Position sizing", "Guardrails & insider flow", "Screener",
         "Filing divergence", "Options & futures", "Macro backdrop",
+        "Technical chart & indicators",
     ]
     chosen = st.multiselect(
         "Sections to include", SECTIONS, default=SECTIONS,
@@ -1245,6 +1416,14 @@ with tabs[10]:
         pending.append("Options & futures (open the ⚡ Options & Futures tab once)")
     if pending:
         st.info("Not yet computed, so these will be skipped: " + "; ".join(pending))
+
+    _rep_iv = st.session_state.get("chart_interval", "15m")
+    _rep_hz = int(st.session_state.get("chart_horizon", 6))
+    if "Technical chart & indicators" in want:
+        st.caption(
+            f"The technical section uses the **{_rep_iv}** interval and a **{_rep_hz}-bar** "
+            f"accuracy horizon, following the Charts tab. Change them there to change the report."
+        )
 
     if st.button("🧾 Generate Report", type="primary"):
         with st.spinner("Building report..."):
@@ -1308,6 +1487,14 @@ with tabs[10]:
                           if "Screener" in want else None),
                 options=(st.session_state.get("rep_options")
                          if "Options & futures" in want else None),
+                chart_png=(get_chart_png_cached(tk, _rep_iv, price)
+                           if "Technical chart & indicators" in want else None),
+                chart_interval=_rep_iv if "Technical chart & indicators" in want else None,
+                indicators=(get_indicators_cached(tk, _rep_iv, price)
+                            if "Technical chart & indicators" in want else None),
+                indicator_accuracy=(get_accuracy_cached(tk, _rep_iv, price, _rep_hz)
+                                    if "Technical chart & indicators" in want else None),
+                accuracy_horizon=_rep_hz if "Technical chart & indicators" in want else None,
             )
 
         ext = "pdf" if reports.has_reportlab() else "txt"

@@ -47,6 +47,28 @@ earnings-call sentiment — then **explains** and **stress-tests** that estimate
   a persistent **SQLite** store, upgradeable to **PostgreSQL** via
   `DATABASE_URL`) speeds up repeat lookups of parsed SEC filings.
 
+### Charting & Technical Analysis
+- **TradingView charts** embedded at **5m / 10m / 15m / 30m / 1h**, with EMA,
+  RSI, MACD and VWAP studies preloaded. Yahoo has no native 10-minute bar, so
+  that interval is built by resampling 5m data into true 10m candles.
+- **Native brokerage-style candles** — candlesticks with EMA 9/20/50, VWAP and
+  Bollinger bands, a direction-coloured volume histogram, and RSI and MACD
+  panels. This is the chart embedded in the PDF, since an iframe cannot be.
+- **11-indicator panel** across trend (EMA stack, MACD, Supertrend, ADX),
+  momentum (RSI, Stochastic), volatility (Bollinger, ATR) and volume (VWAP,
+  OBV), each reduced to a Bullish / Bearish / Neutral call with a consensus.
+- **Measured signal accuracy** — every indicator's call is recomputed at each
+  bar and scored against the actual move N bars later, reported as a hit rate
+  with a **Wilson 95% confidence interval**. An indicator is only called
+  "better than chance" when that interval excludes 50%.
+
+> **On accuracy claims.** This app does not ship an "80% accurate" indicator,
+> because no such thing survives walk-forward testing on liquid US equities.
+> It measures what each signal actually did on the bars in front of you and
+> reports that, including when the answer is "no better than a coin flip".
+> Trading costs are not modelled, so a positive directional edge can still lose
+> money after spread and commission.
+
 ### Quant Execution Layer
 - **Market-regime classifier** — a Hidden Markov Model over VIX and the yield
   curve labels the tape *Calm / Neutral / Stress / Crisis* and scales conviction
@@ -95,6 +117,7 @@ stock-valuation-predictor/
 ├── .streamlit/config.toml
 └── svp/                       # application package
     ├── theme.py               # palette / CSS / matplotlib styling
+    ├── charts.py              # brokerage-style candlestick + indicator panels
     ├── features.py            # feature engineering incl. QoQ/YoY trend metrics
     ├── reports.py             # ReportLab PDF reports
     ├── data/
@@ -105,6 +128,7 @@ stock-valuation-predictor/
     │   ├── insider.py         # Form 4 insider flow + short interest
     │   ├── filings_nlp.py     # TF-IDF divergence between filings
     │   ├── options.py         # live option chains (+ synthetic fallback)
+    │   ├── intraday.py        # 5m/10m/15m/30m/1h OHLCV bars
     │   └── storage.py         # SQLite / PostgreSQL persistent cache
     ├── models/
     │   ├── valuation.py       # XGBoost point + quantile + Monte-Carlo

@@ -26,7 +26,7 @@ from svp.analytics import technical as TA
 from svp.data import market as market_mod, macro as macro_mod
 from svp.features import FEATURE_COLUMNS
 
-EXPECTED_TABS = 11
+EXPECTED_TABS = 12
 
 
 def build_seed_analysis():
