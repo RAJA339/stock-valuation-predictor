@@ -171,3 +171,73 @@ class TestStorageCache:
         st = storage.stats()
         assert "backend" in st and st["backend"]
         assert st["rows"] >= 0
+
+
+# ── Peer table dtypes ────────────────────────────────────────────────────────
+class TestPeerTableDtypes:
+    """
+    Every peer multiple is Optional[float]. When no row carries a value the
+    column used to come back as dtype ``object`` full of ``None``, which
+    matplotlib rejects with ``unsupported operand type(s) for +: 'int' and
+    'NoneType'`` the moment it tried to draw the bar. NaN is the representation
+    the rest of the stack already handles, so the columns must be numeric even
+    when they are entirely empty.
+    """
+
+    NUMERIC = ("EV/EBITDA", "P/E", "Debt/Equity", "P/S",
+               "Profit Margin", "Market Cap ($B)")
+
+    @pytest.fixture
+    def empty_feed(self, monkeypatch):
+        """Force every lookup to miss, so all metrics land as None."""
+        from svp.analytics import peers as P
+
+        monkeypatch.setattr(P, "_yf_metrics", lambda *a, **k: None)
+        monkeypatch.setattr(
+            P, "_estimated_metrics",
+            lambda ticker: P.PeerMetrics(
+                ticker=ticker, name=ticker, ev_ebitda=None, pe=None,
+                debt_to_equity=None, ps=None, profit_margin=None,
+                market_cap=None, source="empty",
+            ),
+        )
+        return P
+
+    def test_all_missing_columns_are_still_numeric(self, empty_feed):
+        df = empty_feed.benchmark("AAPL", sector="Technology")
+        assert not df.empty
+        for col in self.NUMERIC:
+            assert np.issubdtype(df[col].dtype, np.floating), (
+                f"{col} came back as {df[col].dtype}, not a float dtype"
+            )
+            assert df[col].isna().all()
+
+    def test_all_missing_column_is_plottable(self, empty_feed):
+        """The exact call that raised in production."""
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        df = empty_feed.benchmark("AAPL", sector="Technology")
+        fig, ax = plt.subplots()
+        try:
+            ax.bar(np.arange(len(df)), df["EV/EBITDA"], width=0.4)
+        finally:
+            plt.close(fig)
+
+    def test_summary_survives_an_empty_column(self, empty_feed):
+        summ = empty_feed.peer_summary(empty_feed.benchmark("AAPL", sector="Technology"))
+        for metric, d in summ.items():
+            assert d["subject"] is None, metric
+            assert d["peer_median"] is None, metric
+            assert d["premium_pct"] is None, metric
+
+    def test_populated_table_keeps_its_values(self):
+        from svp.analytics import peers as P
+
+        df = P.benchmark("AAPL", sector="Technology")
+        for col in self.NUMERIC:
+            assert np.issubdtype(df[col].dtype, np.floating)
+        # The offline estimator always fills these, so coercion must not have
+        # turned real numbers into NaN.
+        assert df["P/E"].notna().any()
