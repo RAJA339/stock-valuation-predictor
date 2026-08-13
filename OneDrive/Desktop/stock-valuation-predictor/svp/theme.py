@@ -2,52 +2,84 @@
 Shared palette, matplotlib styling and Streamlit CSS.
 =====================================================
 
-The look follows US retail brokerage terminals — Robinhood, Webull,
-Thinkorswim, TradingView — rather than a generic dashboard:
+Four colours, allocated on a strict 60 / 30 / 10 rule.
 
-  * near-black ground (#0B0E11) with slightly raised cards, not flat panels
-  * a single accent, with green/red reserved for direction so colour always
-    means P&L rather than decoration
-  * tabular numerals everywhere a price or percentage appears, so digits line
-    up column-to-column and don't jitter as values update
-  * dense type — brokerages fit a lot on screen; padding is tight by design
+  60%  OBSIDIAN BLACK  — every surface: page ground, cards, sidebar, table
+                         bodies, inputs, buttons at rest. Four values of the
+                         one hue, so depth comes from lightness rather than
+                         from introducing colours.
+  30%  PEARL WHITE     — all typography, borders, grid lines, axis labels,
+                         chart overlays. This is what the eye actually reads.
+  10%  DEEP EMERALD +  — spent only where it must be: emerald carries "up"
+       CHAMPAGNE BEIGE   and positive value, champagne marks the single
+                         active or selected element.
 
-``BULL`` and ``BEAR`` are the only semantically loaded colours. Nothing else in
-the palette should be used to imply direction.
+**One derived colour.** The four given colours contain nothing that can mean
+"down", and a price chart without a down colour is unreadable — a red candle
+has to be red. ``GARNET`` is therefore derived at the same saturation and
+value as the emerald so it sits inside the family rather than shouting over
+it. It is used for direction only, never for decoration.
+
+Deep emerald at full depth disappears against obsidian, so ``EMERALD_BRIGHT``
+is used for type and candles while ``EMERALD`` fills larger areas where the
+darker value reads correctly.
+
+Nothing outside these groups introduces a hue. ``svp.charts`` imports directly
+from here, so the charts cannot drift from the UI.
 """
 
 from __future__ import annotations
 
-# ── Ground ────────────────────────────────────────────────────────────────────
-BG          = "#0B0E11"   # app background — near black, like a trading terminal
-PANEL       = "#151A21"   # card surface
-PANEL_HI    = "#1C232C"   # hovered / raised surface
-SIDEBAR     = "#0E1217"
-BORDER      = "#232B36"
-GRID        = "#1E252F"
+# ── 60% — OBSIDIAN BLACK: every surface ──────────────────────────────────────
+OBSIDIAN_DEEP = "#0A0B0D"   # page ground
+OBSIDIAN      = "#121417"   # card / panel surface
+OBSIDIAN_HI   = "#1B1F23"   # hover / raised
+OBSIDIAN_LINE = "#272C31"   # borders, dividers
 
-# ── Type ──────────────────────────────────────────────────────────────────────
-TEXT        = "#E6EDF3"
-MUTED       = "#8B949E"
-FAINT       = "#5A626C"
+BG       = OBSIDIAN_DEEP
+PANEL    = OBSIDIAN
+PANEL_HI = OBSIDIAN_HI
+SIDEBAR  = "#0E1013"
+BORDER   = OBSIDIAN_LINE
+GRID     = "#20242A"
 
-# ── Direction (the only colours that carry meaning) ───────────────────────────
-BULL        = "#00C805"   # Robinhood green
-BEAR        = "#FF3B30"
-BULL_DIM    = "#0B2E12"
-BEAR_DIM    = "#33110F"
+# ── 30% — PEARL WHITE: everything you read ───────────────────────────────────
+PEARL       = "#F4F2ED"     # primary type
+PEARL_DIM   = "#CBC7BF"     # secondary type, chart lines
+PEARL_MUTED = "#948F86"     # labels
+PEARL_FAINT = "#5F5B55"
 
-# ── Accent ────────────────────────────────────────────────────────────────────
-ACCENT      = "#4C8DFF"
-ACCENT_DIM  = "#132A4D"
-AMBER       = "#F0B429"
-VIOLET      = "#B392F0"
+TEXT  = PEARL
+MUTED = PEARL_MUTED
+FAINT = PEARL_FAINT
 
-# Backwards-compatible aliases — older modules import these names.
-TEAL, GREEN, YELLOW, RED, BLUE = ACCENT, BULL, AMBER, BEAR, ACCENT
+# ── 10% — DEEP EMERALD + CHAMPAGNE BEIGE ─────────────────────────────────────
+EMERALD        = "#0E6B50"  # deep emerald — fills and large areas
+EMERALD_BRIGHT = "#1FA87C"  # legible on obsidian: type, candles, lines
+EMERALD_DIM    = "#0C2A22"
 
-# Ordered categorical sequence for multi-series charts.
-SERIES = [ACCENT, BULL, AMBER, VIOLET, "#4CB5AE", "#F19A3E", BEAR, "#7D8590"]
+CHAMPAGNE      = "#E3D2AE"  # the single active / selected element
+CHAMPAGNE_DIM  = "#2E2718"
+
+GARNET       = "#B4483F"    # derived — direction only, see module docstring
+GARNET_BRIGHT = "#D45F53"
+GARNET_DIM   = "#2E1917"
+
+BULL, BEAR = EMERALD_BRIGHT, GARNET_BRIGHT
+BULL_DIM, BEAR_DIM = EMERALD_DIM, GARNET_DIM
+AMBER, AMBER_DIM = CHAMPAGNE, CHAMPAGNE_DIM
+
+# Aliases for modules importing the older names. ACCENT resolves to pearl, not
+# a fifth hue, so the 30% band absorbs generic emphasis and the 10% band stays
+# reserved for direction and selection.
+ACCENT     = PEARL_DIM
+ACCENT_DIM = OBSIDIAN_HI
+VIOLET     = CHAMPAGNE
+TEAL, GREEN, YELLOW, RED, BLUE = PEARL_DIM, BULL, CHAMPAGNE, BEAR, PEARL_DIM
+
+# Categorical sequence: pearl values first, the 10% accents last and sparing.
+SERIES = [PEARL_DIM, PEARL_MUTED, "#A8A29A", PEARL_FAINT, CHAMPAGNE,
+          EMERALD_BRIGHT, GARNET_BRIGHT, EMERALD]
 
 CSS = f"""
 <style>
@@ -73,7 +105,7 @@ CSS = f"""
         margin-bottom: 10px;
         transition: border-color .15s ease, background .15s ease;
     }}
-    .metric-card:hover {{ background: {PANEL_HI}; border-color: #2E3742; }}
+    .metric-card:hover {{ background: {PANEL_HI}; border-color: {OBSIDIAN_HI}; }}
     .metric-label {{
         font-size: .70rem; color: {MUTED}; text-transform: uppercase;
         letter-spacing: .07em; font-weight: 600; margin-bottom: 6px;
@@ -100,9 +132,9 @@ CSS = f"""
         font-size: .68rem; font-weight: 700; margin-left: 6px;
         letter-spacing: .04em; vertical-align: middle;
     }}
-    .pill-live    {{ background: {BULL_DIM}; color: {BULL}; border: 1px solid #14431C; }}
-    .pill-offline {{ background: {BEAR_DIM}; color: #FF8A82; border: 1px solid #4A1A16; }}
-    .pill-accent  {{ background: {ACCENT_DIM}; color: {ACCENT}; border: 1px solid #1D3A66; }}
+    .pill-live    {{ background: {BULL_DIM}; color: {BULL}; border: 1px solid {BULL_DIM}; }}
+    .pill-offline {{ background: {BEAR_DIM}; color: {BEAR}; border: 1px solid {BEAR_DIM}; }}
+    .pill-accent  {{ background: {AMBER_DIM}; color: {AMBER}; border: 1px solid {AMBER_DIM}; }}
 
     /* ── Tabs — brokerage-style underline, not boxes ────────────────────── */
     .stTabs [data-baseweb="tab-list"] {{
@@ -116,7 +148,7 @@ CSS = f"""
     .stTabs [data-baseweb="tab"]:hover {{ color: {TEXT}; background: {PANEL}; }}
     .stTabs [aria-selected="true"] {{
         color: {TEXT} !important; background: transparent !important;
-        box-shadow: inset 0 -2px 0 0 {ACCENT};
+        box-shadow: inset 0 -2px 0 0 {AMBER};
     }}
     .stTabs [data-baseweb="tab-highlight"] {{ background-color: transparent; }}
 
@@ -145,11 +177,11 @@ CSS = f"""
     }}
     .stButton > button:hover {{ border-color: {ACCENT}; color: {ACCENT}; background: {PANEL_HI}; }}
     .stButton > button[kind="primary"] {{
-        background: {ACCENT}; border-color: {ACCENT}; color: #06090D;
+        background: {AMBER}; border-color: {AMBER}; color: {OBSIDIAN_DEEP};
     }}
-    .stButton > button[kind="primary"]:hover {{ background: #6BA1FF; color: #06090D; }}
+    .stButton > button[kind="primary"]:hover {{ background: {AMBER}; color: {OBSIDIAN_DEEP}; }}
     .stDownloadButton > button {{
-        background: {BULL}; border: none; color: #06110A; font-weight: 700; border-radius: 8px;
+        background: {BULL}; border: none; color: {OBSIDIAN_DEEP}; font-weight: 700; border-radius: 8px;
     }}
 
     /* ── Tables ─────────────────────────────────────────────────────────── */
@@ -185,8 +217,8 @@ CSS = f"""
     #MainMenu, footer {{ visibility: hidden; }}
     ::-webkit-scrollbar {{ width: 9px; height: 9px; }}
     ::-webkit-scrollbar-track {{ background: {BG}; }}
-    ::-webkit-scrollbar-thumb {{ background: #2A323D; border-radius: 5px; }}
-    ::-webkit-scrollbar-thumb:hover {{ background: #3A434F; }}
+    ::-webkit-scrollbar-thumb {{ background: {OBSIDIAN_HI}; border-radius: 5px; }}
+    ::-webkit-scrollbar-thumb:hover {{ background: {PEARL_FAINT}; }}
 
     /* ── Ticker header ──────────────────────────────────────────────────── */
     .ticker-head {{ display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;

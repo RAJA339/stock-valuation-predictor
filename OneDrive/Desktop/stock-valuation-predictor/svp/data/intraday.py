@@ -44,7 +44,11 @@ INTERVALS: dict[str, tuple[str, str, Optional[str]]] = {
 BAR_MINUTES = {"5m": 5, "10m": 10, "15m": 15, "30m": 30, "1h": 60}
 
 _CACHE: dict[tuple, tuple[float, "IntradayData"]] = {}
-_CACHE_TTL = 300.0
+# Short by design. Yahoo's free intraday feed is itself delayed ~15 minutes,
+# so caching for minutes on top of that is pure added lag for no benefit. The
+# TTL is what actually rate-limits us: the UI may refresh every few seconds,
+# but the network is only touched once per window.
+_CACHE_TTL = 20.0
 
 
 @dataclass
