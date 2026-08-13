@@ -826,6 +826,8 @@ with tabs[9]:
     ec1, ec2 = st.columns([1, 2])
     with ec1:
         expiry = st.selectbox("Expiry", expiries, index=min(2, len(expiries) - 1), key="opt_expiry")
+        if st.button("🔄 Refresh chain", key="opt_refresh"):
+            options_mod.clear_cache()
         rf_rate = st.number_input(
             "Risk-free rate (r)", value=float(macro_now.fed_funds or 4.5) / 100.0,
             min_value=0.0, max_value=0.20, step=0.0025, format="%.4f", key="opt_r",
@@ -846,6 +848,14 @@ with tabs[9]:
         oc.markdown(
             metric_card("Chain Source", "yfinance LIVE" if chain.is_live else "SYNTHETIC", sub=True),
             unsafe_allow_html=True,
+        )
+
+    if not chain.is_live:
+        st.warning(
+            f"⚠️ **These are not real quotes.** The live chain could not be fetched, so the "
+            f"strikes and premiums below are Black-Scholes synthetics generated around the "
+            f"current spot — useful for exercising the pricer, not for trading decisions.\n\n"
+            f"Reason: `{chain.reason or 'unknown'}`"
         )
 
     _cols = ["strike", "lastPrice", "bid", "ask", "openInterest", "volume", "impliedVolatility"]

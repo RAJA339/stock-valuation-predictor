@@ -6,12 +6,17 @@ Pulls live strike prices, bids/asks, open interest and implied volatility via
 ``yfinance``'s ``Ticker.option_chain(date)``. Falls back to a deterministic
 synthetic chain (Black-Scholes-priced around the current spot) so the Options
 tab always has data to render, even offline.
+
+The fallback is never silent: ``OptionChain.reason`` records why the live fetch
+did not happen, so the UI can say "no network" rather than quietly showing
+made-up strikes as though they were real quotes.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -38,6 +43,21 @@ def _deriv():
     return derivatives
 
 
+# Columns the UI and the report expect, in display order.
+CHAIN_COLUMNS = [
+    "strike", "lastPrice", "bid", "ask", "volume",
+    "openInterest", "impliedVolatility", "inTheMoney",
+]
+
+# Short-lived in-process cache. Streamlit reruns the whole script on every
+# widget interaction (expiry dropdown, vol slider, strike input), so without
+# this a single session would hammer Yahoo with a request per keystroke and
+# get itself rate-limited.
+_CACHE: dict[tuple, tuple[float, "OptionChain"]] = {}
+_CACHE_TTL = 300.0  # seconds
+_EXPIRY_CACHE: dict[str, tuple[float, list[str]]] = {}
+
+
 @dataclass
 class OptionChain:
     ticker: str
@@ -46,28 +66,98 @@ class OptionChain:
     calls: pd.DataFrame
     puts: pd.DataFrame
     source: str
+    reason: str = ""          # why the live fetch was not used, if it wasn't
 
     @property
     def is_live(self) -> bool:
         return self.source == "yfinance"
 
 
-def list_expiries(ticker: str) -> list[str]:
+def _normalize(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """
+    Coerce a yfinance chain frame into the columns the app expects.
+
+    Live frames carry extra columns (contractSymbol, lastTradeDate, change,
+    percentChange, contractSize, currency) and can carry NaN volume/open
+    interest for illiquid strikes. Missing columns are added as NaN so callers
+    can index them unconditionally.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(columns=CHAIN_COLUMNS)
+
+    out = df.copy()
+    for col in CHAIN_COLUMNS:
+        if col not in out.columns:
+            out[col] = np.nan
+
+    for col in ("strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility"):
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    # Volume and open interest are genuinely zero when untraded, not unknown.
+    out["volume"] = out["volume"].fillna(0)
+    out["openInterest"] = out["openInterest"].fillna(0)
+
+    out = out.dropna(subset=["strike"]).sort_values("strike").reset_index(drop=True)
+    return out[CHAIN_COLUMNS]
+
+
+def _spot_from_chain(chain, tk, fallback: float) -> float:
+    """
+    Resolve spot from the option_chain payload first.
+
+    ``option_chain()`` returns an ``underlying`` dict already fetched in the
+    same request, so preferring it avoids a second network round-trip to
+    fast_info and keeps spot consistent with the quotes in the chain.
+    """
+    def _ok(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool) \
+            and v and v > 0 and not pd.isna(v)
+
+    underlying = chain.underlying if isinstance(getattr(chain, "underlying", None), dict) else {}
+
+    # A live traded price first, from whichever source has one. Only then fall
+    # back to stale-but-real quotes (previous close, bid/ask) — yesterday's
+    # close is a worse spot than fast_info's last price, so it ranks below it.
+    if _ok(underlying.get("regularMarketPrice")):
+        return float(underlying["regularMarketPrice"])
+    try:
+        v = tk.fast_info.get("lastPrice")
+        if _ok(v):
+            return float(v)
+    except Exception:
+        pass
+    for key in ("regularMarketPreviousClose", "bid", "ask"):
+        if _ok(underlying.get(key)):
+            return float(underlying[key])
+    return float(fallback)
+
+
+def list_expiries(ticker: str, use_cache: bool = True) -> list[str]:
     """Return available expiry date strings for a ticker."""
+    ticker = ticker.upper().strip()
+    now = time.time()
+    if use_cache:
+        hit = _EXPIRY_CACHE.get(ticker)
+        if hit and now - hit[0] < _CACHE_TTL:
+            return hit[1]
+
     if _HAS_YF:
         try:
             exps = yf.Ticker(ticker).options
             if exps:
-                return list(exps)
+                out = list(exps)
+                _EXPIRY_CACHE[ticker] = (now, out)
+                return out
         except Exception:
             pass
+
     # Synthetic fallback expiries: next 4 monthly-ish dates + a 1y LEAP.
     today = pd.Timestamp.today().normalize()
-    out = [(today + pd.Timedelta(days=d)).strftime("%Y-%m-%d") for d in (30, 60, 90, 180, 365)]
-    return out
+    return [(today + pd.Timedelta(days=d)).strftime("%Y-%m-%d") for d in (30, 60, 90, 180, 365)]
 
 
-def _synthetic_chain(ticker: str, expiry: str, spot: float, r: float = 0.045) -> OptionChain:
+def _synthetic_chain(ticker: str, expiry: str, spot: float, r: float = 0.045,
+                     reason: str = "") -> OptionChain:
     """Black-Scholes-priced synthetic chain so the tab always renders."""
     deriv = _deriv()
     T = max((pd.Timestamp(expiry) - pd.Timestamp.today().normalize()).days, 1) / 365.0
@@ -92,29 +182,71 @@ def _synthetic_chain(ticker: str, expiry: str, spot: float, r: float = 0.045) ->
                 "impliedVolatility": round(iv, 4),
                 "inTheMoney": (k < spot) if kind == "call" else (k > spot),
             })
-        return pd.DataFrame(rows)
+        return pd.DataFrame(rows)[CHAIN_COLUMNS]
 
-    return OptionChain(ticker, expiry, spot, build("call"), build("put"), source="synthetic")
+    return OptionChain(ticker, expiry, spot, build("call"), build("put"),
+                       source="synthetic", reason=reason)
 
 
-def get_option_chain(ticker: str, expiry: Optional[str] = None, spot_fallback: float = 100.0) -> OptionChain:
-    """Fetch the live option chain for ``ticker``/``expiry`` (or the nearest one)."""
+def get_option_chain(
+    ticker: str,
+    expiry: Optional[str] = None,
+    spot_fallback: float = 100.0,
+    use_cache: bool = True,
+) -> OptionChain:
+    """
+    Fetch the live option chain for ``ticker`` / ``expiry`` (or the nearest one).
+
+    Falls back to a synthetic chain on any failure, recording the cause in
+    ``OptionChain.reason``. Results are cached briefly so Streamlit reruns do
+    not re-request the same chain.
+    """
     ticker = ticker.upper().strip()
+    key = (ticker, expiry)
+    now = time.time()
+
+    if use_cache:
+        hit = _CACHE.get(key)
+        if hit and now - hit[0] < _CACHE_TTL:
+            return hit[1]
+
+    reason = "yfinance not installed"
     if _HAS_YF:
         try:
             tk = yf.Ticker(ticker)
             expiries = tk.options
-            if expiries:
+            if not expiries:
+                reason = f"no listed options for {ticker}"
+            else:
                 exp = expiry if (expiry and expiry in expiries) else expiries[0]
                 chain = tk.option_chain(exp)
-                spot = spot_fallback
-                try:
-                    spot = float(tk.fast_info.get("lastPrice") or spot_fallback)
-                except Exception:
-                    pass
-                return OptionChain(ticker, exp, spot, chain.calls, chain.puts, source="yfinance")
-        except Exception:
-            pass
 
-    exp = expiry or list_expiries(ticker)[2]  # default ~90d
-    return _synthetic_chain(ticker, exp, spot_fallback)
+                # option_chain() returns calls=puts=None when the payload is
+                # empty — indexing those would raise, so treat it as a miss.
+                calls = _normalize(getattr(chain, "calls", None))
+                puts = _normalize(getattr(chain, "puts", None))
+                if calls.empty and puts.empty:
+                    reason = f"empty chain returned for {ticker} {exp}"
+                else:
+                    spot = _spot_from_chain(chain, tk, spot_fallback)
+                    live = OptionChain(ticker, exp, spot, calls, puts, source="yfinance")
+                    _CACHE[key] = (now, live)
+                    return live
+        except Exception as exc:  # network, rate-limit, schema drift
+            reason = f"{type(exc).__name__}: {exc}"[:200]
+
+    # Default to roughly the third expiry (~90d) but never index past the end —
+    # thinly traded names can list only one or two.
+    available = list_expiries(ticker) or [
+        (pd.Timestamp.today().normalize() + pd.Timedelta(days=90)).strftime("%Y-%m-%d")
+    ]
+    exp = expiry or available[min(2, len(available) - 1)]
+    out = _synthetic_chain(ticker, exp, spot_fallback, reason=reason)
+    _CACHE[key] = (now, out)
+    return out
+
+
+def clear_cache() -> None:
+    """Drop cached chains/expiries — used by the UI's manual refresh."""
+    _CACHE.clear()
+    _EXPIRY_CACHE.clear()
