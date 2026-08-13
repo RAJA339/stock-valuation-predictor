@@ -44,10 +44,28 @@ except Exception:
     _HAS_LLAMA = False
 
 
+LLM_KEY_NAMES = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLAMA_CLOUD_API_KEY")
+
+
 def has_llm_key() -> bool:
-    """True when an embedding/LLM API key is configured in the environment."""
-    return any(os.getenv(k) for k in
-               ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLAMA_CLOUD_API_KEY"))
+    """
+    True when an embedding/LLM API key is configured.
+
+    Checks ``st.secrets`` as well as the environment. On Streamlit Cloud a key
+    is normally added through the secrets UI rather than as an environment
+    variable, and checking only ``os.environ`` produces the worst kind of
+    support question — the user has set the key, and the app still insists
+    there isn't one.
+    """
+    if any(os.getenv(k) for k in LLM_KEY_NAMES):
+        return True
+    try:
+        import streamlit as st
+
+        return any(st.secrets.get(k) for k in LLM_KEY_NAMES)
+    except Exception:
+        # No Streamlit context, or no secrets file — env is the only source.
+        return False
 
 
 @dataclass

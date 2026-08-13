@@ -1183,9 +1183,12 @@ with tabs[10]:
 
         if not rag_mod.store.has_llm_key():
             st.caption(
-                "ℹ️ No LLM key configured, so answers are **extractive**: bullets are "
-                "quoted verbatim from the filing rather than paraphrased. Set "
-                "`OPENAI_API_KEY` to add a synthesis layer on top of the same passages."
+                "Answers are **extractive**: every bullet is quoted verbatim from the "
+                "filing with its Item citation, so you can check it against EDGAR. "
+                "This is the default and needs no configuration. Adding an "
+                "`OPENAI_API_KEY` (environment variable or Streamlit secret) plus "
+                "`llama-index` layers an optional written summary *above* the same "
+                "quotes — it does not change or replace them."
             )
 
         st.markdown("**Try one of these**")
