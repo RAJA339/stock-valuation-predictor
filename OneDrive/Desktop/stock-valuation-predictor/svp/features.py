@@ -119,35 +119,49 @@ def build_features(
     price = market_price or md.price or 100.0
 
     # ── Levels ───────────────────────────────────────────────────────────────
-    revenue = sec.concept_first(
-        facts, ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"]
-    )
-    net_income = sec.extract_latest(facts, "NetIncomeLoss")
-    total_assets = sec.extract_latest(facts, "Assets")
-    equity = sec.extract_latest(facts, "StockholdersEquity")
-    op_cash_flow = sec.extract_latest(facts, "NetCashProvidedByUsedInOperatingActivities")
-    capex = sec.extract_latest(facts, "PaymentsToAcquirePropertyPlantAndEquipment")
-    long_term_debt = sec.concept_first(facts, ["LongTermDebt", "LongTermDebtNoncurrent"])
+    # Every field goes through the tag-variant lists: filers label the same
+    # line item differently, and a single tag name silently yields None for a
+    # large share of real companies (equity especially, where anything with a
+    # minority interest uses the long form).
+    revenue = sec.concept_first(facts, sec.REVENUE_TAGS)
+    net_income = sec.concept_first(facts, sec.NET_INCOME_TAGS)
+    total_assets = sec.concept_first(facts, sec.ASSETS_TAGS)
+    equity = sec.concept_first(facts, sec.EQUITY_TAGS)
+    op_cash_flow = sec.concept_first(facts, sec.OCF_TAGS)
+    capex = sec.concept_first(facts, sec.CAPEX_TAGS)
+    long_term_debt = sec.concept_first(facts, sec.DEBT_TAGS)
     shares = md.shares_outstanding or sec.extract_latest(
         facts, "CommonStockSharesOutstanding", unit="shares"
     ) or sec.extract_latest(facts, "EntityCommonStockSharesOutstanding", unit="shares")
 
-    if None in (net_income, equity, total_assets) or price <= 0:
+    # Only a usable price and *some* fundamental grounding are required. The
+    # models are gradient-boosted trees, which handle NaN natively, so demanding
+    # all three of net income / equity / assets rejected companies whose filings
+    # were merely tagged unusually — the user saw "no data" for a company whose
+    # data was present. Missing fields flow through as NaN and the affected
+    # ratios are simply absent from the explanation.
+    if price <= 0:
         return None
+    if net_income is None and total_assets is None and revenue is None:
+        return None
+
+    missing = [n for n, v in (("net income", net_income), ("equity", equity),
+                              ("total assets", total_assets), ("revenue", revenue),
+                              ("operating cash flow", op_cash_flow)) if v is None]
 
     shares = shares or 1e9
     market_cap = md.market_cap or price * shares
 
     # ── Derived ratios ───────────────────────────────────────────────────────
-    eps = net_income / shares
-    pe_ratio = price / eps if eps and eps > 0 else np.nan
-    roe = net_income / equity if equity else np.nan
-    roa = net_income / total_assets if total_assets else np.nan
+    eps = net_income / shares if net_income is not None else None
+    pe_ratio = price / eps if (eps and eps > 0) else np.nan
+    roe = net_income / equity if (net_income is not None and equity) else np.nan
+    roa = net_income / total_assets if (net_income is not None and total_assets) else np.nan
     debt_to_equity = (long_term_debt or 0) / equity if equity else np.nan
-    free_cash_flow = (op_cash_flow or 0) - (capex or 0)
-    fcf_yield = free_cash_flow / market_cap if market_cap else np.nan
+    free_cash_flow = ((op_cash_flow or 0) - (capex or 0)) if op_cash_flow is not None else None
+    fcf_yield = free_cash_flow / market_cap if (free_cash_flow is not None and market_cap) else np.nan
     asset_turnover = revenue / total_assets if (revenue and total_assets) else np.nan
-    profit_margin = net_income / revenue if (revenue and revenue != 0) else np.nan
+    profit_margin = net_income / revenue if (net_income is not None and revenue) else np.nan
 
     # ── Trend / delta features ───────────────────────────────────────────────
     rev_hist = sec.history_first(
@@ -187,6 +201,7 @@ def build_features(
     # Raw fundamentals kept alongside for DCF / peer / report / guardrail modules.
     features["_raw"] = {
         "cik": cik,
+        "missing_fields": missing,
         "revenue": revenue,
         "net_income": net_income,
         "total_assets": total_assets,
