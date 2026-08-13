@@ -49,11 +49,19 @@ CHAIN_COLUMNS = [
     "openInterest", "impliedVolatility", "inTheMoney", "ivRepaired",
 ]
 
-# Plausible bounds for an equity implied vol. Yahoo returns a placeholder near
-# zero (~1e-5) for many contracts — especially near-dated ones — and that value
-# is truthy, so it silently poisons any downstream sigma. Anything outside this
-# band is treated as missing and re-solved from the quoted premium.
+# Plausible bounds for an equity implied vol. Outside this band a quoted value
+# is rejected outright.
 IV_MIN, IV_MAX = 0.01, 5.0
+
+# A bounds check alone is not enough. Yahoo emits dyadic placeholder constants
+# — 0.015625 (2^-6) and 0.0625 (2^-4) were both observed live, on NVDA/KO/SOFI
+# and F respectively — which sit comfortably *inside* any sane band while being
+# off by 30-60 vol points. The robust test is self-consistency: an implied vol
+# must reprice the contract to its own quoted premium. This is the tolerance on
+# that repricing, generous enough to absorb the drift from Yahoo quoting IV off
+# the last trade while we value off the mid.
+IV_REPRICE_TOL_FRAC = 0.15
+IV_REPRICE_TOL_ABS = 0.05
 
 # Short-lived in-process cache. Streamlit reruns the whole script on every
 # widget interaction (expiry dropdown, vol slider, strike input), so without
@@ -122,37 +130,55 @@ def _mid_price(row) -> Optional[float]:
 def repair_iv(df: pd.DataFrame, spot: float, T: float, kind: str,
               r: float = 0.045) -> pd.DataFrame:
     """
-    Replace implausible quoted implied vols by re-solving from the premium.
+    Replace unusable quoted implied vols by re-solving them from the premium.
 
-    Yahoo frequently reports ~1e-5 rather than a real IV. Left alone that value
-    flows into the pricer as sigma and produces a near-zero-vol world: bogus
-    probabilities of finishing in the money and a meaningless edge ranking.
-    Rows that cannot be re-solved (premium at or below intrinsic) are left as
-    NaN so callers can skip them rather than trust a placeholder.
+    A quoted IV is rejected when it is missing, outside [IV_MIN, IV_MAX], or —
+    the case a bounds check misses — when repricing the contract at that vol
+    fails to reproduce its own quoted premium. Yahoo emits dyadic placeholders
+    (2^-6, 2^-4) that look plausible but are off by tens of vol points; only
+    the repricing test catches those.
+
+    Rejected rows are re-solved from the mid via Brent. If that fails (premium
+    at or below intrinsic, so no IV exists) the quoted value is kept when it
+    was at least in-bounds, and set NaN otherwise — the aim is never to leave a
+    number the pricer would believe but that cannot be true.
     """
     if df.empty or T <= 0 or spot <= 0:
         return df
 
     deriv = _deriv()
     out = df.copy()
-    iv = out["impliedVolatility"]
-    bad = iv.isna() | (iv < IV_MIN) | (iv > IV_MAX)
-    if not bad.any():
-        return out
 
-    for idx in out.index[bad]:
+    for idx in out.index:
         row = out.loc[idx]
+        quoted = row["impliedVolatility"]
+        strike = float(row["strike"])
         premium = _mid_price(row)
+
+        in_bounds = pd.notna(quoted) and IV_MIN <= quoted <= IV_MAX
+        suspect = not in_bounds
+
+        # Self-consistency: does the quoted vol reproduce the quoted premium?
+        if in_bounds and premium:
+            modelled = deriv.black_scholes(spot, strike, T, r, float(quoted), kind=kind).price
+            tol = max(IV_REPRICE_TOL_FRAC * premium, IV_REPRICE_TOL_ABS)
+            if abs(modelled - premium) > tol:
+                suspect = True
+
+        if not suspect:
+            continue
+
         solved = None
         if premium:
-            solved = deriv.implied_volatility(
-                premium, spot, float(row["strike"]), T, r, kind=kind
-            )
+            solved = deriv.implied_volatility(premium, spot, strike, T, r, kind=kind)
+
         if solved is not None and IV_MIN <= solved <= IV_MAX:
             out.at[idx, "impliedVolatility"] = float(solved)
-            out.at[idx, "ivRepaired"] = True
-        else:
+            # Only flag a material change, so the UI count means something.
+            out.at[idx, "ivRepaired"] = not in_bounds or abs(solved - float(quoted)) > 0.01
+        elif not in_bounds:
             out.at[idx, "impliedVolatility"] = np.nan
+
     return out
 
 
