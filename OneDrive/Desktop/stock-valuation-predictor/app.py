@@ -127,24 +127,32 @@ def get_insider_cached(ticker: str, cik: str):
     return insider_mod.get_insider_signal(ticker, cik)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+# Live-tab TTLs are deliberately short. Anything longer is lag we are adding
+# on top of the feed's own delay; the module-level cache in svp.data.intraday
+# is what protects the rate limit.
+LIVE_TTL = 20
+
+
+@st.cache_data(ttl=LIVE_TTL, show_spinner=False)
 def get_intraday_cached(ticker: str, interval: str, spot: float):
     return intraday_mod.get_intraday(ticker, interval, spot_fallback=spot)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=LIVE_TTL, show_spinner=False)
 def get_indicators_cached(ticker: str, interval: str, spot: float):
     return ind_mod.compute(get_intraday_cached(ticker, interval, spot).df)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def get_accuracy_cached(ticker: str, interval: str, spot: float, horizon: int):
-    return acc_mod.measure(get_indicators_cached(ticker, interval, spot), horizon=horizon)
-
-
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=LIVE_TTL, show_spinner=False)
 def get_chart_png_cached(ticker: str, interval: str, spot: float) -> bytes:
     return charts.render(get_indicators_cached(ticker, interval, spot).df, ticker, interval)
+
+
+# Accuracy is a walk-forward statistic over hundreds of bars — it barely moves
+# tick to tick, and recomputing it on every refresh would be wasted CPU.
+@st.cache_data(ttl=600, show_spinner=False)
+def get_accuracy_cached(ticker: str, interval: str, spot: float, horizon: int):
+    return acc_mod.measure(get_indicators_cached(ticker, interval, spot), horizon=horizon)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -390,98 +398,135 @@ with tabs[0]:
             "Accuracy horizon (bars forward)", [3, 6, 12, 24], index=1, key="chart_horizon",
             help="How far ahead a signal is scored. 6 bars is 30 minutes at 5m, 6 hours at 1h.",
         )
-    with c3:
-        chart_style = st.radio("Chart", ["TradingView", "Native"], horizontal=True,
-                               key="chart_style")
+    chart_style = st.radio("Chart", ["TradingView", "Native"], horizontal=True,
+                           key="chart_style", label_visibility="collapsed")
 
-    bars = get_intraday_cached(tk, tv_interval, price)
-    iset = get_indicators_cached(tk, tv_interval, price)
+    with c3:
+        refresh_label = st.selectbox(
+            "Auto-refresh", ["Off", "5s", "10s", "30s", "60s"], index=2, key="chart_refresh",
+            help="Refreshes only this block, not the whole app — a full rerun would "
+                 "recompute every tab and is what previously caused CPU throttling.",
+        )
+    _REFRESH = {"Off": None, "5s": 5, "10s": 10, "30s": 30, "60s": 60}[refresh_label]
+
     acc_rows = get_accuracy_cached(tk, tv_interval, price, int(horizon_bars))
     acc_sum = acc_mod.summary(acc_rows)
 
-    if not bars.is_live:
-        st.warning(
-            f"⚠️ Intraday candles are **simulated**, not market data — the live feed "
-            f"was unavailable, so the bars, indicators and hit rates below describe a "
-            f"synthetic series.\n\nReason: `{bars.reason or 'unknown'}`"
-        )
+    # Only this block re-runs on the timer. A whole-script rerun would recompute
+    # all 12 tabs, which is exactly what got the app CPU-throttled before, so the
+    # live view is scoped to a fragment. st.fragment landed in Streamlit 1.38;
+    # older builds degrade to a manual refresh rather than failing.
+    _fragment = getattr(st, "fragment", None)
+    _wrap = (lambda fn: _fragment(run_every=_REFRESH)(fn)) if (_fragment and _REFRESH) \
+        else (lambda fn: fn)
 
-    # ── Quote strip ──────────────────────────────────────────────────────────
-    last = bars.last_price or price
-    chg = bars.session_change or 0.0
-    q1, q2, q3, q4, q5 = st.columns(5)
-    q1.markdown(metric_card("Last", f"${last:,.2f}"), unsafe_allow_html=True)
-    q2.markdown(
-        f'<div class="metric-card"><div class="metric-label">Change (window)</div>'
-        f'<div class="{"signal-under" if chg >= 0 else "signal-over"}">{chg * 100:+.2f}%</div></div>',
-        unsafe_allow_html=True)
-    q3.markdown(metric_card("Consensus", iset.consensus, sub=True), unsafe_allow_html=True)
-    q4.markdown(metric_card("Bull / Bear", f"{iset.bullish} / {iset.bearish}", sub=True),
-                unsafe_allow_html=True)
-    q5.markdown(metric_card("Bars", f"{len(bars.df):,}", sub=True), unsafe_allow_html=True)
+    @_wrap
+    def _live_view():
+        bars = get_intraday_cached(tk, tv_interval, price)
+        iset = get_indicators_cached(tk, tv_interval, price)
+        st.session_state["rep_chart_interval"] = tv_interval
 
-    # ── Chart ────────────────────────────────────────────────────────────────
-    if chart_style == "TradingView":
-        tv_map = {"5m": "5", "10m": "10", "15m": "15", "30m": "30", "1h": "60"}
-        st.components.v1.html(f"""
-<div class="tradingview-widget-container" style="height:620px">
-  <div id="tv_chart" style="height:620px"></div>
-</div>
-<script src="https://s3.tradingview.com/tv.js"></script>
-<script>
-new TradingView.widget({{
-  "autosize": true, "symbol": "{tk}", "interval": "{tv_map[tv_interval]}",
-  "timezone": "America/New_York", "theme": "dark", "style": "1", "locale": "en",
-  "toolbar_bg": "#161B22", "enable_publishing": false, "hide_side_toolbar": false,
-  "allow_symbol_change": true, "withdateranges": true, "details": true,
-  "studies": ["MASimple@tv-basicstudies", "RSI@tv-basicstudies",
-              "MACD@tv-basicstudies", "VWAP@tv-basicstudies"],
-  "container_id": "tv_chart"
-}});
-</script>
-""", height=640)
+        if not bars.is_live:
+            st.warning(
+                f"⚠️ Intraday candles are **simulated**, not market data — the live feed "
+                f"was unavailable, so the bars, indicators and hit rates below describe a "
+                f"synthetic series.\n\nReason: `{bars.reason or 'unknown'}`"
+            )
+
+        # ── Quote strip ──────────────────────────────────────────────────────────
+        last = bars.last_price or price
+        chg = bars.session_change or 0.0
+        q1, q2, q3, q4, q5 = st.columns(5)
+        q1.markdown(metric_card("Last", f"${last:,.2f}"), unsafe_allow_html=True)
+        q2.markdown(
+            f'<div class="metric-card"><div class="metric-label">Change (window)</div>'
+            f'<div class="{"signal-under" if chg >= 0 else "signal-over"}">{chg * 100:+.2f}%</div></div>',
+            unsafe_allow_html=True)
+        q3.markdown(metric_card("Consensus", iset.consensus, sub=True), unsafe_allow_html=True)
+        q4.markdown(metric_card("Bull / Bear", f"{iset.bullish} / {iset.bearish}", sub=True),
+                    unsafe_allow_html=True)
+        q5.markdown(metric_card("Bars", f"{len(bars.df):,}", sub=True), unsafe_allow_html=True)
+
+        # ── Chart ────────────────────────────────────────────────────────────────
+        if chart_style == "TradingView":
+            tv_map = {"5m": "5", "10m": "10", "15m": "15", "30m": "30", "1h": "60"}
+            st.components.v1.html(f"""
+    <div class="tradingview-widget-container" style="height:620px">
+      <div id="tv_chart" style="height:620px"></div>
+    </div>
+    <script src="https://s3.tradingview.com/tv.js"></script>
+    <script>
+    new TradingView.widget({{
+      "autosize": true, "symbol": "{tk}", "interval": "{tv_map[tv_interval]}",
+      "timezone": "America/New_York", "theme": "dark", "style": "1", "locale": "en",
+      "toolbar_bg": "#161B22", "enable_publishing": false, "hide_side_toolbar": false,
+      "allow_symbol_change": true, "withdateranges": true, "details": true,
+      "studies": ["MASimple@tv-basicstudies", "RSI@tv-basicstudies",
+                  "MACD@tv-basicstudies", "VWAP@tv-basicstudies"],
+      "container_id": "tv_chart"
+    }});
+    </script>
+    """, height=640)
+            st.caption(
+                "TradingView's own chart, with EMA, RSI, MACD and VWAP loaded. It renders in "
+                "your browser, so it needs internet access and **cannot be captured into the "
+                "PDF** — the report embeds the Native chart instead. "
+                f"TradingView has no 10-minute interval; at 10m it shows {tv_map[tv_interval]}m "
+                "while the native chart and every indicator below use true resampled 10m bars."
+                if tv_interval == "10m" else
+                "TradingView's own chart, with EMA, RSI, MACD and VWAP loaded. It renders in "
+                "your browser, so it needs internet access and **cannot be captured into the "
+                "PDF** — the report embeds the Native chart instead."
+            )
+        else:
+            png = charts.render(iset.df, tk, tv_interval)
+            if png:
+                st.image(png, width="stretch")
+                st.caption("Native chart — this is exactly what goes into the PDF report.")
+
+        st.divider()
+
+        # ── Indicator panel ──────────────────────────────────────────────────────
+        st.markdown('<div class="section-header">📶 Indicator Panel</div>', unsafe_allow_html=True)
+        ic1, ic2 = st.columns([1.6, 1])
+        with ic1:
+            st.dataframe(iset.as_frame(), width="stretch", hide_index=True, height=420)
+        with ic2:
+            strip = charts.signal_strip(iset)
+            if strip:
+                st.image(strip, width="stretch")
+            st.metric("Net score", f"{iset.net_score:+.2f}",
+                      help="Mean of +1 bullish / 0 neutral / −1 bearish across all indicators")
+            st.caption(
+                f"**{iset.bullish}** bullish · **{iset.neutral}** neutral · "
+                f"**{iset.bearish}** bearish across {len(iset.signals)} indicators."
+            )
+
+        st.divider()
+
+        _stamp = bars.df.index[-1] if len(bars.df) else None
         st.caption(
-            "TradingView's own chart, with EMA, RSI, MACD and VWAP loaded. It renders in "
-            "your browser, so it needs internet access and **cannot be captured into the "
-            "PDF** — the report embeds the Native chart instead. "
-            f"TradingView has no 10-minute interval; at 10m it shows {tv_map[tv_interval]}m "
-            "while the native chart and every indicator below use true resampled 10m bars."
-            if tv_interval == "10m" else
-            "TradingView's own chart, with EMA, RSI, MACD and VWAP loaded. It renders in "
-            "your browser, so it needs internet access and **cannot be captured into the "
-            "PDF** — the report embeds the Native chart instead."
-        )
-    else:
-        png = charts.render(iset.df, tk, tv_interval)
-        if png:
-            st.image(png, width="stretch")
-            st.caption("Native chart — this is exactly what goes into the PDF report.")
-
-    st.divider()
-
-    # ── Indicator panel ──────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">📶 Indicator Panel</div>', unsafe_allow_html=True)
-    ic1, ic2 = st.columns([1.6, 1])
-    with ic1:
-        st.dataframe(iset.as_frame(), width="stretch", hide_index=True, height=420)
-    with ic2:
-        strip = charts.signal_strip(iset)
-        if strip:
-            st.image(strip, width="stretch")
-        st.metric("Net score", f"{iset.net_score:+.2f}",
-                  help="Mean of +1 bullish / 0 neutral / −1 bearish across all indicators")
-        st.caption(
-            f"**{iset.bullish}** bullish · **{iset.neutral}** neutral · "
-            f"**{iset.bearish}** bearish across {len(iset.signals)} indicators."
+            f"Last bar **{_stamp:%H:%M:%S}** · fetched {pd.Timestamp.now():%H:%M:%S} · "
+            f"refresh {refresh_label.lower()}"
+            + ("" if bars.is_live else " · simulated data")
+            + "  \n_Yahoo's free intraday feed is delayed roughly 15 minutes; the app adds "
+              "at most 20s on top of that. Nothing here is a real-time tick feed._"
+            if _stamp is not None else "No bars loaded."
         )
 
-    st.divider()
+    _live_view()
+
+    if _REFRESH and not _fragment:
+        st.info(
+            "Auto-refresh needs Streamlit 1.38 or newer for `st.fragment`; this build is "
+            f"{st.__version__}. The view still updates whenever you interact with it."
+        )
 
     # ── Measured accuracy ────────────────────────────────────────────────────
     st.markdown('<div class="section-header">🎯 Measured Signal Accuracy</div>',
                 unsafe_allow_html=True)
     st.caption(
-        f"Each indicator's call is recomputed at every one of the {len(bars.df):,} bars and "
+        f"Each indicator's call is recomputed at every bar and "
         f"scored against the actual move {horizon_bars} bars later. These are realised hit "
         f"rates on **{tk} at {tv_interval}** — not vendor claims."
     )

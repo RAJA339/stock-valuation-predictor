@@ -23,19 +23,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-# Brokerage palette — green/red candles on a dark ground.
 from . import theme
 
 # One palette across the app: charts must not drift from the UI.
-UP = theme.BULL
-DOWN = theme.BEAR
-BG = theme.BG
-PANEL = theme.PANEL
-GRID = theme.GRID
-TEXT = theme.TEXT
-MUTED = theme.MUTED
-ACCENT = theme.ACCENT
-AMBER = theme.AMBER
+UP = theme.BULL          # deep emerald (10%)
+DOWN = theme.BEAR        # derived garnet — direction only (10%)
+BG = theme.BG            # obsidian (60%)
+PANEL = theme.PANEL      # obsidian (60%)
+GRID = theme.GRID        # obsidian (60%)
+TEXT = theme.TEXT        # pearl (30%)
+MUTED = theme.MUTED      # pearl (30%)
+ACCENT = theme.PEARL_DIM # pearl — overlays stay in the 30% band
+AMBER = theme.CHAMPAGNE  # champagne (10%) — one highlight only
 
 
 def _style(ax):
@@ -96,9 +95,12 @@ def render(
         ax_p.plot(x, d["BB_UP"], color=ACCENT, lw=0.6, alpha=0.45)
         ax_p.plot(x, d["BB_LOW"], color=ACCENT, lw=0.6, alpha=0.45)
 
-    for col, colour, label in (("EMA9", "#FFFFFF", "EMA 9"),
-                               ("EMA20", AMBER, "EMA 20"),
-                               ("EMA50", ACCENT, "EMA 50")):
+    # EMAs are reference context, so they stay inside the 30% pearl band as
+    # three values of one hue. Champagne is spent on VWAP alone — the single
+    # line a trader anchors to.
+    for col, colour, label in (("EMA9", theme.PEARL, "EMA 9"),
+                               ("EMA20", theme.PEARL_DIM, "EMA 20"),
+                               ("EMA50", theme.PEARL_MUTED, "EMA 50")):
         if col in d and d[col].notna().any():
             ax_p.plot(x, d[col], color=colour, lw=1.0, label=label, alpha=0.9)
 
@@ -110,7 +112,7 @@ def render(
             new_session = d.index.normalize().to_series().diff().ne(pd.Timedelta(0)).to_numpy(copy=True)
             new_session[0] = False
             vw = vw.mask(pd.Series(new_session, index=d.index))
-        ax_p.plot(x, vw, color=theme.VIOLET, lw=1.2, ls="--", label="VWAP", alpha=0.9)
+        ax_p.plot(x, vw, color=AMBER, lw=1.2, ls="--", label="VWAP", alpha=0.9)
 
     last = float(d["Close"].iloc[-1])
     first = float(d["Close"].iloc[0])
@@ -118,7 +120,7 @@ def render(
     tint = UP if chg >= 0 else DOWN
     ax_p.axhline(last, color=tint, lw=0.7, ls=":", alpha=0.8)
     ax_p.annotate(f" {last:,.2f} ", xy=(1.0, last), xycoords=("axes fraction", "data"),
-                  color="#000000", fontsize=8, fontweight="bold", va="center",
+                  color=theme.OBSIDIAN_DEEP, fontsize=8, fontweight="bold", va="center",
                   bbox=dict(boxstyle="round,pad=0.25", fc=tint, ec="none"))
 
     ax_p.set_title(f"{ticker}   ·   {interval}   ·   {last:,.2f}  ({chg:+.2f}%)",
@@ -137,7 +139,7 @@ def render(
 
     # RSI
     if "RSI" in d:
-        ax_r.plot(x, d["RSI"], color=AMBER, lw=1.1)
+        ax_r.plot(x, d["RSI"], color=theme.PEARL_DIM, lw=1.1)
         ax_r.axhline(70, color=DOWN, lw=0.6, ls="--", alpha=0.7)
         ax_r.axhline(30, color=UP, lw=0.6, ls="--", alpha=0.7)
         ax_r.fill_between(x, 30, 70, color=MUTED, alpha=0.06)
@@ -149,8 +151,8 @@ def render(
         hist = d["MACD_HIST"]
         ax_m.bar(x, hist, color=np.where(hist >= 0, UP, DOWN),
                  width=float(np.median(np.diff(x))) * 0.7 if len(x) > 1 else 0.01, alpha=0.6)
-        ax_m.plot(x, d["MACD"], color=ACCENT, lw=1.0, label="MACD")
-        ax_m.plot(x, d["MACD_SIG"], color=AMBER, lw=1.0, label="Signal")
+        ax_m.plot(x, d["MACD"], color=theme.PEARL, lw=1.0, label="MACD")
+        ax_m.plot(x, d["MACD_SIG"], color=theme.PEARL_MUTED, lw=1.0, label="Signal")
         ax_m.axhline(0, color=MUTED, lw=0.6)
         ax_m.set_ylabel("MACD", fontsize=7)
 
@@ -187,7 +189,7 @@ def signal_strip(iset, width: int = 900) -> bytes:
         ax.barh([0], [frac], left=[left], color=colour, height=0.55)
         if frac > 0.08:
             ax.text(left + frac / 2, 0, f"{label} {count}", ha="center", va="center",
-                    color="#0D1117" if colour != MUTED else TEXT, fontsize=9, fontweight="bold")
+                    color=theme.OBSIDIAN_DEEP if colour != MUTED else TEXT, fontsize=9, fontweight="bold")
         left += frac
     ax.set_xlim(0, 1)
     ax.axis("off")
