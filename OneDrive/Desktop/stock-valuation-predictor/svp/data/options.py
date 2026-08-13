@@ -71,6 +71,38 @@ _CACHE: dict[tuple, tuple[float, "OptionChain"]] = {}
 _CACHE_TTL = 300.0  # seconds
 _EXPIRY_CACHE: dict[str, tuple[float, list[str]]] = {}
 
+# Circuit breaker. Yahoo throttles per IP, and the throttle lasts longer the
+# harder you push it. Without this, a rate-limited session keeps firing a
+# request on every Streamlit rerun — every slider drag — which is the fastest
+# way to stay banned. After a failure all network calls are skipped until the
+# cooldown expires, so the ban is allowed to lapse.
+_COOLDOWN_UNTIL = 0.0
+_COOLDOWN_REASON = ""
+_RATE_LIMIT_COOLDOWN = 900.0   # 15 min after an explicit rate-limit
+_ERROR_COOLDOWN = 120.0        # 2 min after any other failure
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    return "ratelimit" in text.replace(" ", "") or "too many requests" in text or "429" in text
+
+
+def _trip_breaker(exc: Exception) -> None:
+    global _COOLDOWN_UNTIL, _COOLDOWN_REASON
+    wait = _RATE_LIMIT_COOLDOWN if _is_rate_limit(exc) else _ERROR_COOLDOWN
+    _COOLDOWN_UNTIL = time.time() + wait
+    _COOLDOWN_REASON = f"{type(exc).__name__}: {exc}"[:160]
+
+
+def cooldown_remaining() -> float:
+    """Seconds until network calls resume, 0 when not backing off."""
+    return max(0.0, _COOLDOWN_UNTIL - time.time())
+
+
+def _cooldown_note() -> str:
+    return (f"backing off for {cooldown_remaining() / 60:.0f} more minute(s) "
+            f"after {_COOLDOWN_REASON}")
+
 
 @dataclass
 class OptionChain:
@@ -222,19 +254,23 @@ def list_expiries(ticker: str, use_cache: bool = True) -> list[str]:
         if hit and now - hit[0] < _CACHE_TTL:
             return hit[1]
 
-    if _HAS_YF:
+    if _HAS_YF and cooldown_remaining() <= 0:
         try:
             exps = yf.Ticker(ticker).options
             if exps:
                 out = list(exps)
                 _EXPIRY_CACHE[ticker] = (now, out)
                 return out
-        except Exception:
-            pass
+        except Exception as exc:
+            _trip_breaker(exc)
 
     # Synthetic fallback expiries: next 4 monthly-ish dates + a 1y LEAP.
+    # Cached like a real result — leaving it uncached meant every Streamlit
+    # rerun re-fired the request that had just failed.
     today = pd.Timestamp.today().normalize()
-    return [(today + pd.Timedelta(days=d)).strftime("%Y-%m-%d") for d in (30, 60, 90, 180, 365)]
+    out = [(today + pd.Timedelta(days=d)).strftime("%Y-%m-%d") for d in (30, 60, 90, 180, 365)]
+    _EXPIRY_CACHE[ticker] = (now, out)
+    return out
 
 
 def _synthetic_chain(ticker: str, expiry: str, spot: float, r: float = 0.045,
@@ -293,7 +329,9 @@ def get_option_chain(
             return hit[1]
 
     reason = "yfinance not installed"
-    if _HAS_YF:
+    if _HAS_YF and cooldown_remaining() > 0:
+        reason = _cooldown_note()
+    elif _HAS_YF:
         try:
             tk = yf.Ticker(ticker)
             expiries = tk.options
@@ -318,6 +356,7 @@ def get_option_chain(
                     _CACHE[key] = (now, live)
                     return live
         except Exception as exc:  # network, rate-limit, schema drift
+            _trip_breaker(exc)
             reason = f"{type(exc).__name__}: {exc}"[:200]
 
     # Default to roughly the third expiry (~90d) but never index past the end —
@@ -331,7 +370,16 @@ def get_option_chain(
     return out
 
 
-def clear_cache() -> None:
-    """Drop cached chains/expiries — used by the UI's manual refresh."""
+def clear_cache(reset_cooldown: bool = True) -> None:
+    """
+    Drop cached chains/expiries — used by the UI's manual refresh.
+
+    Also lifts the circuit breaker by default: an explicit refresh is the user
+    overriding the back-off, which is exactly when they want a real attempt.
+    """
+    global _COOLDOWN_UNTIL, _COOLDOWN_REASON
     _CACHE.clear()
     _EXPIRY_CACHE.clear()
+    if reset_cooldown:
+        _COOLDOWN_UNTIL = 0.0
+        _COOLDOWN_REASON = ""

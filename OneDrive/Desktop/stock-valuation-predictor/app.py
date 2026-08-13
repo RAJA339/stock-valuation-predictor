@@ -862,12 +862,22 @@ with tabs[9]:
         )
 
     if not chain.is_live:
-        st.warning(
+        _cool = options_mod.cooldown_remaining()
+        _msg = (
             f"⚠️ **These are not real quotes.** The live chain could not be fetched, so the "
             f"strikes and premiums below are Black-Scholes synthetics generated around the "
             f"current spot — useful for exercising the pricer, not for trading decisions.\n\n"
             f"Reason: `{chain.reason or 'unknown'}`"
         )
+        if "ratelimit" in chain.reason.lower().replace(" ", "") or _cool > 0:
+            _msg += (
+                f"\n\nYahoo throttles per IP address, and the block lasts longer the more "
+                f"requests you send while it is active — so the app has stopped calling out "
+                f"for **{_cool / 60:.0f} more minute(s)** to let it lapse. Avoid the "
+                f"Screener and repeated refreshes until then. Everything else in the app "
+                f"keeps working; only live quotes are affected."
+            )
+        st.warning(_msg)
 
     _cols = ["strike", "lastPrice", "bid", "ask", "openInterest", "volume", "impliedVolatility"]
 
