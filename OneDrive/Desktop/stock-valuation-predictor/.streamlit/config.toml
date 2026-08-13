@@ -1,9 +1,12 @@
+# Palette mirrors svp/theme.py — brokerage-terminal dark.
+# Keep these in sync: this styles Streamlit's own chrome (menus, widgets,
+# spinners, date pickers) that the injected CSS cannot reach.
 [theme]
 base = "dark"
-primaryColor = "#028090"
-backgroundColor = "#0D1B2A"
-secondaryBackgroundColor = "#1E293B"
-textColor = "#CADCFC"
+primaryColor = "#4C8DFF"
+backgroundColor = "#0B0E11"
+secondaryBackgroundColor = "#151A21"
+textColor = "#E6EDF3"
 
 [server]
 maxUploadSize = 50

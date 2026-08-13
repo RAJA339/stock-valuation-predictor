@@ -335,18 +335,28 @@ regime = analysis["regime"]
 technical = analysis["technical"]
 sizing = analysis["sizing"]
 
+# ── Quote header — the price block a brokerage app opens with ────────────────
+_day_change = None
+if not md.history.empty and len(md.history) > 1:
+    _prev = float(md.history["Close"].iloc[-2])
+    _day_change = (price - _prev) / _prev if _prev else None
+
 st.markdown(
-    f"### {raw.get('name', tk)} ({tk}) "
-    f"{theme.source_pill(md.is_live, f'{md.source.upper()} LIVE', 'OFFLINE')}"
-    f'&nbsp;<span class="pill {"pill-live" if regime.is_risk_on else "pill-offline"}">'
-    f"REGIME: {regime.regime}</span>",
+    theme.quote_header(
+        tk, raw.get("name", tk), price, _day_change,
+        pills=(theme.source_pill(md.is_live, f"{md.source.upper()} LIVE", "OFFLINE")
+               + f'&nbsp;<span class="pill '
+                 f'{"pill-live" if regime.is_risk_on else "pill-offline"}">'
+                 f"REGIME: {regime.regime}</span>"),
+    ),
     unsafe_allow_html=True,
 )
+st.write("")
 
 # ── Headline metric row ───────────────────────────────────────────────────────
 h1, h2, h3, h4 = st.columns(4)
-h1.markdown(metric_card("Intrinsic Value (point)", f"${result.point:.2f}"), unsafe_allow_html=True)
-h2.markdown(metric_card("Intrinsic Range (p10–p90)", f"${result.low:.0f} – ${result.high:.0f}", sub=True),
+h1.markdown(metric_card("Intrinsic Value", f"${result.point:.2f}"), unsafe_allow_html=True)
+h2.markdown(metric_card("Range (p10–p90)", f"${result.low:.0f} – ${result.high:.0f}", sub=True),
             unsafe_allow_html=True)
 h3.markdown(metric_card("Market Price", f"${price:.2f}"), unsafe_allow_html=True)
 h4.markdown(

@@ -24,15 +24,18 @@ import numpy as np
 import pandas as pd
 
 # Brokerage palette — green/red candles on a dark ground.
-UP = "#00C805"          # Robinhood green
-DOWN = "#FF5000"        # Robinhood red
-BG = "#0D1117"
-PANEL = "#161B22"
-GRID = "#21262D"
-TEXT = "#C9D1D9"
-MUTED = "#6E7681"
-ACCENT = "#58A6FF"
-AMBER = "#F0B429"
+from . import theme
+
+# One palette across the app: charts must not drift from the UI.
+UP = theme.BULL
+DOWN = theme.BEAR
+BG = theme.BG
+PANEL = theme.PANEL
+GRID = theme.GRID
+TEXT = theme.TEXT
+MUTED = theme.MUTED
+ACCENT = theme.ACCENT
+AMBER = theme.AMBER
 
 
 def _style(ax):
@@ -107,7 +110,7 @@ def render(
             new_session = d.index.normalize().to_series().diff().ne(pd.Timedelta(0)).to_numpy(copy=True)
             new_session[0] = False
             vw = vw.mask(pd.Series(new_session, index=d.index))
-        ax_p.plot(x, vw, color="#B392F0", lw=1.2, ls="--", label="VWAP", alpha=0.9)
+        ax_p.plot(x, vw, color=theme.VIOLET, lw=1.2, ls="--", label="VWAP", alpha=0.9)
 
     last = float(d["Close"].iloc[-1])
     first = float(d["Close"].iloc[0])
