@@ -1,5 +1,5 @@
 """
-Intrinsic Stock Valuation Predictor  —  v2.0
+Intrinsic Stock Valuation Predictor  —  v4.0
 ============================================
 Webster University — MS Business Analytics | Group ML Project
 Author: Raja Mupparaju
@@ -14,7 +14,13 @@ Feature areas (each in its own tab):
   3. DCF & Scenario   — interactive DCF (WACC / terminal-growth sliders) + Monte-Carlo
   4. Peer Benchmarking— EV/EBITDA, P/E, Debt/Equity vs industry peers
   5. Backtesting      — signal performance over 1/3/5-year horizons
-  6. Report           — one-click PDF equity research summary
+  6. Execution/Timing — HMM market regime + 200-SMA / RSI / volume-POC filters
+  7. Guardrails       — Piotroski F, Altman Z, Beneish M, insider & short flow
+  8. Screener         — top-decile margin-of-safety ranking across a universe
+  9. Filings Δ        — TF-IDF divergence between consecutive 10-K / 10-Q filings
+ 10. Options & Futures— live chains, Black-Scholes Greeks, cost-of-carry, and a
+                        bridge from the intrinsic target to mispriced contracts
+ 11. Report           — one-click PDF equity research summary
 
 The heavy lifting lives in the ``svp`` package. Every data/ML dependency degrades
 gracefully, so the app runs even without network access or optional libraries.
@@ -36,9 +42,20 @@ import streamlit as st
 
 from svp import theme
 from svp.features import build_features, FEATURE_LABELS
-from svp.data import market as market_mod, macro as macro_mod, sentiment as sent_mod, storage
-from svp.models import valuation as val_mod, explain as explain_mod, dcf as dcf_mod, backtest as bt_mod
-from svp.analytics import peers as peers_mod
+from svp.data import (
+    market as market_mod, macro as macro_mod, sentiment as sent_mod, storage,
+    sec as sec_mod, insider as insider_mod, filings_nlp as nlp_mod,
+    options as options_mod,
+)
+from svp.models import (
+    valuation as val_mod, explain as explain_mod, dcf as dcf_mod, backtest as bt_mod,
+    regime as regime_mod, relative as relative_mod, sizing as sizing_mod,
+    derivatives as deriv_mod,
+)
+from svp.analytics import (
+    peers as peers_mod, technical as technical_mod, quality as quality_mod,
+    screener as screener_mod,
+)
 from svp import reports
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -96,7 +113,7 @@ with st.sidebar:
         if st.checkbox("Use sample transcript"):
             transcript = sent_mod.SAMPLE_TRANSCRIPT
 
-    run_btn = st.button("🔍  Analyze", type="primary", use_container_width=True)
+    run_btn = st.button("🔍  Analyze", type="primary", width="stretch")
 
     st.divider()
     st.markdown("**Data & Model**")
@@ -163,6 +180,25 @@ def run_analysis(ticker: str, price_override: float, transcript: str, use_live: 
     attribution = explain_mod.explain_prediction(feats, vm)
     signal_text, signal_class = val_mod.valuation_signal(result.point, price)
 
+    # ── v3 execution / guardrail layer ───────────────────────────────────────
+    # Market regime from VIX + yield curve.
+    vix_md = get_market_cached("^VIX", 18.0)
+    regime = regime_mod.detect_from_market(vix_md, macro_now)
+
+    # Technical confirmation from price/volume history.
+    technical = technical_mod.analyze(md.history)
+
+    # Position sizing + dynamic risk floors.
+    ann_vol = sizing_mod.annualized_vol(md.history["Close"]) if not md.history.empty else None
+    atr_val = technical.atr if technical else None
+    sizing = sizing_mod.compute_sizing(
+        price, result.mc_samples, result.low, result.high, atr_val, ann_vol
+    )
+
+    # Regime-adjusted conviction on the raw valuation signal.
+    raw_mos = (result.point - price) / price if price else 0.0
+    adjusted_mos = raw_mos * regime.signal_scaler
+
     return {
         "ticker": ticker,
         "price": price,
@@ -172,6 +208,11 @@ def run_analysis(ticker: str, price_override: float, transcript: str, use_live: 
         "attribution": attribution,
         "signal_text": signal_text,
         "signal_class": signal_class,
+        "regime": regime,
+        "technical": technical,
+        "sizing": sizing,
+        "adjusted_mos": adjusted_mos,
+        "raw_mos": raw_mos,
     }
 
 
@@ -223,10 +264,15 @@ result: val_mod.ValuationResult = analysis["result"]
 attribution: explain_mod.Attribution = analysis["attribution"]
 signal_text = analysis["signal_text"]
 signal_class = analysis["signal_class"]
+regime = analysis["regime"]
+technical = analysis["technical"]
+sizing = analysis["sizing"]
 
 st.markdown(
     f"### {raw.get('name', tk)} ({tk}) "
-    f"{theme.source_pill(md.is_live, f'{md.source.upper()} LIVE', 'OFFLINE')}",
+    f"{theme.source_pill(md.is_live, f'{md.source.upper()} LIVE', 'OFFLINE')}"
+    f'&nbsp;<span class="pill {"pill-live" if regime.is_risk_on else "pill-offline"}">'
+    f"REGIME: {regime.regime}</span>",
     unsafe_allow_html=True,
 )
 
@@ -246,7 +292,10 @@ st.divider()
 
 tabs = st.tabs([
     "📊 Valuation", "🔍 Explainability", "🧮 DCF & Scenario",
-    "🏦 Peers", "📉 Backtesting", "📄 Report",
+    "🏦 Peers", "📉 Backtesting",
+    "🎯 Execution & Timing", "🛡️ Guardrails", "🔬 Screener", "📰 Filings Δ",
+    "⚡ Options & Futures",
+    "📄 Report",
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -272,7 +321,7 @@ with tabs[0]:
             else:
                 disp[label] = f"{v:.2f}"
         feat_df = pd.DataFrame(disp.items(), columns=["Feature", "Value"])
-        st.dataframe(feat_df, use_container_width=True, hide_index=True, height=430)
+        st.dataframe(feat_df, width="stretch", hide_index=True, height=430)
 
         sent_obj = raw.get("sentiment_obj")
         if sent_obj is not None:
@@ -293,7 +342,7 @@ with tabs[0]:
         ax.set_xlabel("Intrinsic Value ($)")
         ax.set_ylabel("Monte-Carlo frequency")
         ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=7.5)
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, width="stretch")
         plt.close(fig)
 
         st.markdown(
@@ -314,7 +363,7 @@ with tabs[0]:
     ax2.axvline(price, color=theme.RED, lw=2.5, ls="--", label=f"Market ${price:.2f}")
     ax2.set_yticks([])
     ax2.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8.5, loc="upper right")
-    st.pyplot(fig2, use_container_width=True)
+    st.pyplot(fig2, width="stretch")
     plt.close(fig2)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -349,14 +398,14 @@ with tabs[1]:
         ax.axvline(attribution.prediction, color=theme.YELLOW, lw=1.5, label="Prediction")
         ax.set_xlabel("Intrinsic Value ($) contribution")
         ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, width="stretch")
         plt.close(fig)
 
     with tcol:
         show = adf.copy()
         show["contribution"] = show["contribution"].map(lambda x: f"{x:+.2f}")
         show["value"] = show["value"].map(lambda x: f"{x:.2f}" if isinstance(x, (int, float)) else x)
-        st.dataframe(show, use_container_width=True, hide_index=True, height=430)
+        st.dataframe(show, width="stretch", hide_index=True, height=430)
 
     # Optional LIME.
     st.markdown('<div class="section-header">🍋 LIME Local Explanation</div>', unsafe_allow_html=True)
@@ -364,7 +413,7 @@ with tabs[1]:
         with st.spinner("Computing LIME explanation..."):
             lime_df = explain_mod.lime_explanation(feats, vm)
         if lime_df is not None:
-            st.dataframe(lime_df, use_container_width=True, hide_index=True)
+            st.dataframe(lime_df, width="stretch", hide_index=True)
         else:
             st.caption("LIME explanation unavailable for this instance.")
     else:
@@ -417,7 +466,7 @@ with tabs[2]:
                color=theme.GREEN, label="Discounted (PV)")
         ax.set_xlabel("Year"); ax.set_ylabel("FCF ($B)")
         ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
-        st.pyplot(fig, use_container_width=True); plt.close(fig)
+        st.pyplot(fig, width="stretch"); plt.close(fig)
 
     with g2:
         st.markdown('<div class="section-header">Monte-Carlo Fair-Value Distribution</div>', unsafe_allow_html=True)
@@ -428,7 +477,7 @@ with tabs[2]:
         ax.axvline(price, color=theme.RED, lw=2, ls="--", label=f"Market ${price:.0f}")
         ax.set_xlabel("Fair value / share ($)"); ax.set_ylabel("Frequency")
         ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
-        st.pyplot(fig, use_container_width=True); plt.close(fig)
+        st.pyplot(fig, width="stretch"); plt.close(fig)
 
     st.caption(
         "Hybrid view: the ML model and traditional DCF are independent estimates. "
@@ -458,7 +507,7 @@ with tabs[3]:
     for col in ["EV/EBITDA", "P/E", "Debt/Equity", "P/S", "Market Cap ($B)"]:
         styled[col] = styled[col].map(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
     styled["Profit Margin"] = styled["Profit Margin"].map(lambda x: f"{x*100:.1f}%" if pd.notna(x) else "N/A")
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.dataframe(styled, width="stretch", hide_index=True)
 
     summ = peers_mod.peer_summary(pdf)
     st.markdown('<div class="section-header">Relative Positioning vs Peer Median</div>', unsafe_allow_html=True)
@@ -483,7 +532,7 @@ with tabs[3]:
     ax.bar(x + 0.2, plot_df["EV/EBITDA"], width=0.4, color=theme.GREEN, label="EV/EBITDA")
     ax.set_xticks(x); ax.set_xticklabels(plot_df["Ticker"], fontsize=8)
     ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
-    st.pyplot(fig, use_container_width=True); plt.close(fig)
+    st.pyplot(fig, width="stretch"); plt.close(fig)
     st.caption(f"Peers auto-selected for **{tk}** (sector: {raw.get('sector') or 'n/a'}). "
                "Multiples marked *estimated* when live data was unavailable.")
 
@@ -522,7 +571,7 @@ with tabs[4]:
                     label="Valuation Strategy (long when undervalued)")
             ax.set_ylabel("Growth of $1")
             ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8.5)
-            st.pyplot(fig, use_container_width=True); plt.close(fig)
+            st.pyplot(fig, width="stretch"); plt.close(fig)
         st.caption(
             "Note: point-in-time fundamentals aren't stored, so the backtest uses a "
             "mean-reversion intrinsic-value proxy (trailing average) to evaluate signal "
@@ -530,9 +579,471 @@ with tabs[4]:
         )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 6 — REPORT
+# TAB 6 — EXECUTION & TIMING (regime + technical filters + sizing/risk floors)
 # ══════════════════════════════════════════════════════════════════════════════
 with tabs[5]:
+    st.markdown('<div class="section-header">🌐 Macro Regime</div>', unsafe_allow_html=True)
+    rc1, rc2, rc3, rc4 = st.columns(4)
+    rc1.metric("Regime", regime.regime, help=f"Detected via {regime.source.upper()}")
+    rc2.metric("Confidence", f"{regime.confidence*100:.0f}%")
+    rc3.metric("VIX", f"{regime.vix:.1f}")
+    rc4.metric("Signal Scaler", f"{regime.signal_scaler:.2f}×",
+               help="Valuation conviction is multiplied by this in-regime")
+    st.caption(regime.description)
+
+    if regime.timeline is not None and len(regime.timeline) > 0:
+        st.markdown('<div class="section-header">Regime Timeline (VIX-driven HMM)</div>', unsafe_allow_html=True)
+        code = {"Calm": 0, "Neutral": 1, "Stress": 2, "Crisis": 3}
+        tl = regime.timeline.map(code)
+        fig, ax = plt.subplots(figsize=(9, 2.4))
+        theme.style_axes(fig, ax)
+        colors = {0: theme.GREEN, 1: theme.TEAL, 2: theme.YELLOW, 3: theme.RED}
+        ax.scatter(range(len(tl)), tl.values, s=4,
+                   c=[colors[v] for v in tl.values], edgecolors="none")
+        ax.set_yticks([0, 1, 2, 3]); ax.set_yticklabels(["Calm", "Neutral", "Stress", "Crisis"])
+        ax.set_xlabel("Trading days (history)")
+        st.pyplot(fig, width="stretch"); plt.close(fig)
+
+    st.divider()
+    st.markdown('<div class="section-header">📐 Technical Entry Filters</div>', unsafe_allow_html=True)
+    if technical is None:
+        st.warning("Not enough price history for technical confirmation.")
+    else:
+        tcols = st.columns(4)
+        tcols[0].metric("Price vs 200-SMA", "Above ✅" if technical.trend_up else "Below ❌",
+                        help=f"200-SMA: ${technical.sma200:.2f}" if technical.sma200 else "n/a")
+        tcols[1].metric("RSI(14)", f"{technical.rsi:.0f}" if technical.rsi else "n/a")
+        tcols[2].metric("Bullish Divergence", "Yes ✅" if technical.rsi_bullish_divergence else "No")
+        tcols[3].metric("Volume Support", "Near ✅" if technical.near_volume_support else "—",
+                        help=f"POC: ${technical.volume_poc:.2f}" if technical.volume_poc else "volume data n/a")
+
+        checks = {k: v for k, v in technical.confirmations.items() if v is not None}
+        conf_df = pd.DataFrame(
+            [(k.replace("_", " ").title(), "✅ Pass" if v else "❌ Fail") for k, v in checks.items()],
+            columns=["Confirmation", "Status"],
+        )
+        st.dataframe(conf_df, width="stretch", hide_index=True)
+
+        undervalued = analysis["raw_mos"] > 0.15
+        if undervalued and technical.confirmed:
+            st.success(f"✅ **Entry confirmed** — undervalued signal backed by "
+                       f"{technical.score*100:.0f}% of technical checks. Not a falling knife.")
+        elif undervalued and not technical.confirmed:
+            st.warning("⚠️ Undervalued, but technical confirmation is weak — possible falling knife. "
+                       "Consider waiting for trend/volume confirmation.")
+        else:
+            st.info("No active undervalued signal to confirm right now.")
+
+    st.divider()
+    st.markdown('<div class="section-header">⚖️ Risk-Adjusted Sizing & Execution</div>', unsafe_allow_html=True)
+    scols = st.columns(4)
+    scols[0].markdown(metric_card("Fractional Kelly", f"{sizing.fractional_kelly*100:.1f}%", sub=True),
+                      unsafe_allow_html=True)
+    scols[1].markdown(metric_card("Vol-Parity Weight",
+                                  f"{sizing.vol_parity_weight*100:.1f}%" if sizing.vol_parity_weight else "n/a",
+                                  sub=True), unsafe_allow_html=True)
+    scols[2].markdown(metric_card("Stop-Loss", f"${sizing.stop_loss:.2f}", sub=True), unsafe_allow_html=True)
+    scols[3].markdown(metric_card("Take-Profit", f"${sizing.take_profit:.2f}", sub=True), unsafe_allow_html=True)
+
+    s2 = st.columns(4)
+    s2[0].metric("Win Probability (MC)", f"{sizing.win_probability*100:.0f}%")
+    s2[1].metric("Payoff Ratio", f"{sizing.payoff_ratio:.2f}")
+    s2[2].metric("Risk / Share", f"${sizing.risk_per_share:.2f}")
+    s2[3].metric("Reward:Risk", f"{sizing.reward_risk_ratio:.1f}" if sizing.reward_risk_ratio else "n/a")
+    st.caption(
+        "Fractional Kelly (¼-Kelly) sizes the position from the Monte-Carlo win "
+        "probability & payoff; the stop-loss is the tighter of a 2×ATR stop and the "
+        "model's p10 intrinsic support; take-profit anchors on p90 / intrinsic value."
+    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 7 — GUARDRAILS (quality/distress scores + insider/short)
+# ══════════════════════════════════════════════════════════════════════════════
+with tabs[6]:
+    st.markdown('<div class="section-header">🛡️ Value-Trap & Distress Guardrails</div>', unsafe_allow_html=True)
+    st.caption("Forensic-accounting scores prevent the model from rating structurally "
+               "broken companies as bargains.")
+
+    facts = sec_mod.get_financials(raw["cik"]) if raw.get("cik") else {}
+    with st.spinner("Computing quality & distress scores..."):
+        qs = quality_mod.compute_quality(facts, raw.get("market_cap"))
+
+    qc1, qc2, qc3 = st.columns(3)
+    with qc1:
+        pf = f"{qs.piotroski}/9" if qs.piotroski is not None else "N/A"
+        st.markdown(metric_card("Piotroski F-Score", pf), unsafe_allow_html=True)
+        st.caption("≥7 strong · ≤3 weak fundamentals")
+    with qc2:
+        zz = f"{qs.altman_z:.2f}" if qs.altman_z is not None else "N/A"
+        st.markdown(metric_card(f"Altman Z ({qs.altman_zone})", zz), unsafe_allow_html=True)
+        st.caption(">2.99 safe · <1.81 distress")
+    with qc3:
+        mm = f"{qs.beneish_m:.2f}" if qs.beneish_m is not None else "N/A"
+        st.markdown(metric_card("Beneish M-Score", mm), unsafe_allow_html=True)
+        st.caption(f"{qs.beneish_flag} · >-1.78 manipulation risk")
+
+    if qs.guardrail_triggered():
+        flags = []
+        if qs.weak_fundamentals: flags.append("weak fundamentals (low F-Score)")
+        if qs.is_distressed: flags.append("bankruptcy-distress zone (low Z-Score)")
+        if qs.possible_manipulation: flags.append("earnings-manipulation risk (high M-Score)")
+        st.error("🚩 **Guardrail triggered:** " + "; ".join(flags) +
+                 ". Treat any 'undervalued' reading with caution — possible value trap.")
+    else:
+        st.success("✅ No distress/manipulation guardrails triggered.")
+
+    if qs.piotroski_detail:
+        st.markdown('<div class="section-header">Piotroski Components</div>', unsafe_allow_html=True)
+        pdet = pd.DataFrame(
+            [(k, "✅" if v == 1 else ("❌" if v == 0 else "—")) for k, v in qs.piotroski_detail.items()],
+            columns=["Criterion", "Pass"],
+        )
+        st.dataframe(pdet, width="stretch", hide_index=True)
+    for n in qs.notes:
+        st.caption(f"ℹ️ {n}")
+
+    st.divider()
+    st.markdown('<div class="section-header">👥 Insider Activity & Short Interest</div>', unsafe_allow_html=True)
+    with st.spinner("Fetching Form 4 & short interest..."):
+        ins = insider_mod.get_insider_signal(tk, raw.get("cik"))
+    ic1, ic2, ic3 = st.columns(3)
+    ic1.metric("Insider Net Flow", ins.net_direction,
+               help=f"{ins.buy_count} buy / {ins.sell_count} sell filings (Form 4)")
+    ic2.metric("Short % of Float",
+               f"{ins.short_percent_float*100:.1f}%" if ins.short_percent_float is not None else "n/a")
+    ic3.metric("Source", ins.source)
+    if ins.high_short_interest:
+        st.warning("⚠️ Elevated short interest — institutional money may disagree with an "
+                   "undervalued reading.")
+    if ins.bullish:
+        st.success("✅ Net insider buying corroborates the valuation discrepancy.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 8 — SCREENER (quantile ranking + relative return)
+# ══════════════════════════════════════════════════════════════════════════════
+with tabs[7]:
+    st.markdown('<div class="section-header">🔬 Cross-Sectional Screener</div>', unsafe_allow_html=True)
+    st.caption("Rank a universe by margin-of-safety (p50 vs price) and expected excess "
+               "return; buys are flagged only in the top decile.")
+
+    horizon = st.selectbox("Excess-return horizon", ["1M", "3M"], index=0)
+    universe_txt = st.text_input(
+        "Universe (comma-separated tickers)",
+        value=", ".join(screener_mod.DEFAULT_UNIVERSE[:12]),
+    )
+    run_screen = st.button("🔎 Run Screen", type="primary")
+
+    if run_screen:
+        universe = [t.strip().upper() for t in universe_txt.split(",") if t.strip()]
+        rm = relative_mod.train_relative_model(horizon=horizon)
+        prog = st.progress(0.0, text="Scoring universe...")
+
+        def _cb(done, total, tkr):
+            prog.progress(done / total, text=f"Scored {tkr} ({done}/{total})")
+
+        with st.spinner("Screening..."):
+            sdf = screener_mod.screen(universe, vm, rm, progress=_cb)
+        prog.empty()
+
+        if sdf.empty:
+            st.warning("No tickers could be scored (fundamentals unavailable in this environment).")
+        else:
+            show = sdf.copy()
+            show["Margin of Safety"] = show["Margin of Safety"].map(lambda x: f"{x*100:+.1f}%")
+            show["Exp. Excess Return"] = show["Exp. Excess Return"].map(
+                lambda x: f"{x*100:+.1f}%" if pd.notna(x) else "n/a")
+            for c in ["Market Price", "Intrinsic p50", "Range Low (p10)", "Range High (p90)"]:
+                show[c] = show[c].map(lambda x: f"${x:.2f}")
+            st.dataframe(show, width="stretch", hide_index=True)
+            top = sdf[sdf["TopDecile"]]
+            st.success(f"🏆 Top-decile buys: {', '.join(top['Ticker'].tolist()) or '—'}")
+    else:
+        st.info("Enter a universe and click **Run Screen**. "
+                "Note: live fundamentals are needed to score real tickers.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 9 — FILINGS Δ (10-K/10-Q textual divergence)
+# ══════════════════════════════════════════════════════════════════════════════
+with tabs[8]:
+    st.markdown('<div class="section-header">📰 Fundamental-Delta NLP</div>', unsafe_allow_html=True)
+    st.caption("Cosine-similarity divergence between consecutive SEC filings flags rapid "
+               "changes in risk-factor disclosures before the market digests them.")
+
+    mode = st.radio("Source", ["Fetch latest two filings (SEC)", "Paste two excerpts"],
+                    horizontal=True)
+    if mode == "Paste two excerpts":
+        c1, c2 = st.columns(2)
+        latest_txt = c1.text_area("Latest filing text", value=nlp_mod.SAMPLE_LATEST, height=160)
+        prior_txt = c2.text_area("Prior filing text", value=nlp_mod.SAMPLE_PRIOR, height=160)
+        run_nlp = st.button("🧬 Compare", type="primary")
+        if run_nlp:
+            fd = nlp_mod.compare_texts(latest_txt, prior_txt)
+        else:
+            fd = None
+    else:
+        run_nlp = st.button("🧬 Fetch & Compare", type="primary")
+        fd = None
+        if run_nlp:
+            with st.spinner("Fetching filings from SEC EDGAR..."):
+                fd = nlp_mod.analyze_filings(raw.get("cik"))
+            if fd.similarity is None:
+                st.warning("Could not fetch/parse filings in this environment. "
+                           "Try the 'Paste two excerpts' mode to demo the analysis.")
+
+    if fd is not None and fd.similarity is not None:
+        n1, n2, n3 = st.columns(3)
+        n1.metric("Cosine Similarity", f"{fd.similarity:.3f}")
+        n2.metric("Divergence", f"{fd.divergence:.3f}")
+        n3.metric("Material Change", "Yes ⚠️" if fd.alert else "No ✅")
+        if fd.alert:
+            st.warning("⚠️ Disclosure language shifted materially vs the prior filing.")
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            st.markdown("**Newly emphasized terms**")
+            st.write(", ".join(fd.added_terms) or "—")
+        with cc2:
+            st.markdown("**De-emphasized terms**")
+            st.write(", ".join(fd.dropped_terms) or "—")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 10 — OPTIONS & FUTURES
+# ══════════════════════════════════════════════════════════════════════════════
+with tabs[9]:
+    st.markdown('<div class="section-header">⚡ Live Option Chain</div>', unsafe_allow_html=True)
+    st.caption(
+        "Strikes, bid/ask, open interest and implied volatility pulled from "
+        "`yfinance.Ticker.option_chain(date)`. Falls back to a Black-Scholes-priced "
+        "synthetic chain (with a volatility smile) when the feed is unavailable."
+    )
+
+    expiries = options_mod.list_expiries(tk)
+    ec1, ec2 = st.columns([1, 2])
+    with ec1:
+        expiry = st.selectbox("Expiry", expiries, index=min(2, len(expiries) - 1), key="opt_expiry")
+        rf_rate = st.number_input(
+            "Risk-free rate (r)", value=float(macro_now.fed_funds or 4.5) / 100.0,
+            min_value=0.0, max_value=0.20, step=0.0025, format="%.4f", key="opt_r",
+        )
+        div_yield = st.number_input(
+            "Dividend yield (q)", value=0.0, min_value=0.0, max_value=0.15,
+            step=0.0025, format="%.4f", key="opt_q",
+        )
+
+    chain = options_mod.get_option_chain(tk, expiry, spot_fallback=price)
+    T_exp = max((pd.Timestamp(chain.expiry) - pd.Timestamp.today().normalize()).days, 1) / 365.0
+    spot = chain.spot or price
+
+    with ec2:
+        oa, ob, oc = st.columns(3)
+        oa.markdown(metric_card("Spot", f"${spot:.2f}"), unsafe_allow_html=True)
+        ob.markdown(metric_card("Time to Expiry", f"{T_exp * 365:.0f} days", sub=True), unsafe_allow_html=True)
+        oc.markdown(
+            metric_card("Chain Source", "yfinance LIVE" if chain.is_live else "SYNTHETIC", sub=True),
+            unsafe_allow_html=True,
+        )
+
+    _cols = ["strike", "lastPrice", "bid", "ask", "openInterest", "volume", "impliedVolatility"]
+
+    def _show(df: pd.DataFrame) -> pd.DataFrame:
+        keep = [c for c in _cols if c in df.columns]
+        out = df[keep].copy()
+        if "impliedVolatility" in out.columns:
+            out["impliedVolatility"] = (out["impliedVolatility"] * 100).round(1)
+            out = out.rename(columns={"impliedVolatility": "IV %"})
+        return out
+
+    cl, pu = st.columns(2)
+    with cl:
+        st.markdown("**Calls**")
+        st.dataframe(_show(chain.calls), width="stretch", height=280)
+    with pu:
+        st.markdown("**Puts**")
+        st.dataframe(_show(chain.puts), width="stretch", height=280)
+
+    # ── Volatility smile ─────────────────────────────────────────────────────
+    if "impliedVolatility" in chain.calls.columns and not chain.calls.empty:
+        fig, ax = plt.subplots(figsize=(7, 2.6))
+        ax.plot(chain.calls["strike"], chain.calls["impliedVolatility"] * 100,
+                marker="o", ms=3, lw=1.2, label="Calls")
+        if "impliedVolatility" in chain.puts.columns and not chain.puts.empty:
+            ax.plot(chain.puts["strike"], chain.puts["impliedVolatility"] * 100,
+                    marker="o", ms=3, lw=1.2, label="Puts")
+        ax.axvline(spot, color="#888", ls="--", lw=1, label="Spot")
+        ax.set_xlabel("Strike")
+        ax.set_ylabel("IV (%)")
+        ax.set_title("Implied Volatility Smile")
+        ax.legend(fontsize=7)
+        ax.grid(alpha=0.25)
+        st.pyplot(fig, clear_figure=True)
+
+    st.divider()
+
+    # ── Black-Scholes pricer + Greeks ────────────────────────────────────────
+    st.markdown('<div class="section-header">🧪 Theoretical Pricer & Greeks</div>', unsafe_allow_html=True)
+    st.caption(
+        "Black-Scholes-Merton analytic value cross-checked against a Cox-Ross-Rubinstein "
+        "binomial tree (American exercise) and a GBM Monte-Carlo."
+    )
+
+    g1, g2, g3, g4 = st.columns(4)
+    with g1:
+        opt_kind = st.radio("Type", ["call", "put"], horizontal=True, key="opt_kind")
+    with g2:
+        strike = st.number_input("Strike (K)", value=float(round(spot / 5) * 5),
+                                 min_value=0.01, step=1.0, key="opt_K")
+    with g3:
+        vol_in = st.slider("Volatility σ (%)", 5.0, 120.0, 30.0, 0.5, key="opt_sigma") / 100.0
+    with g4:
+        t_days = st.slider("Days to expiry", 1, 1095, int(T_exp * 365), key="opt_days")
+
+    T_use = t_days / 365.0
+    bs = deriv_mod.black_scholes(spot, strike, T_use, rf_rate, vol_in, div_yield, opt_kind)
+    amer = deriv_mod.binomial_price(spot, strike, T_use, rf_rate, vol_in, div_yield,
+                                    opt_kind, steps=300, american=True)
+    mc = deriv_mod.monte_carlo_price(spot, strike, T_use, rf_rate, vol_in, div_yield,
+                                     opt_kind, n=40000)
+
+    p1, p2, p3 = st.columns(3)
+    p1.markdown(metric_card("Black-Scholes (European)", f"${bs.price:.2f}"), unsafe_allow_html=True)
+    p2.markdown(metric_card("Binomial CRR (American)", f"${amer:.2f}", sub=True), unsafe_allow_html=True)
+    p3.markdown(metric_card("Monte-Carlo", f"${mc['price']:.2f} ± {mc['stderr']:.2f}", sub=True),
+                unsafe_allow_html=True)
+
+    greeks = pd.DataFrame([
+        {"Greek": "Delta (Δ)", "Value": round(bs.delta, 4), "Interpretation": "Δ option value per $1 move in spot"},
+        {"Greek": "Gamma (Γ)", "Value": round(bs.gamma, 5), "Interpretation": "Δ of delta per $1 move in spot"},
+        {"Greek": "Theta (Θ)", "Value": round(bs.theta, 4), "Interpretation": "Value decay per calendar day"},
+        {"Greek": "Vega", "Value": round(bs.vega, 4), "Interpretation": "Δ value per 1 volatility point"},
+        {"Greek": "Rho (ρ)", "Value": round(bs.rho, 4), "Interpretation": "Δ value per 1% move in rates"},
+    ])
+    st.dataframe(greeks, width="stretch", hide_index=True)
+
+    early_ex = amer - bs.price
+    if early_ex > 0.01:
+        st.caption(f"Early-exercise premium (American − European): **${early_ex:.2f}**.")
+
+    st.divider()
+
+    # ── Valuation → options bridge ───────────────────────────────────────────
+    st.markdown('<div class="section-header">🌉 Intrinsic-Value → Options Bridge</div>', unsafe_allow_html=True)
+    st.caption(
+        "Treats the model's intrinsic target as the **projected underlying at expiry (Sₜ)** "
+        "and discounts the resulting payoff back to today. Contracts whose premium sits "
+        "well below that present value are flagged as potentially mispriced LEAPs."
+    )
+
+    dcf_quick = dcf_mod.run_dcf(dcf_mod.DCFInputs(
+        fcf0=float(raw.get("free_cash_flow") or raw.get("op_cash_flow") or 1e9),
+        shares=float(raw.get("shares") or 1e9),
+        net_debt=float(raw.get("long_term_debt") or 0.0),
+    ))
+
+    b1, b2 = st.columns([1, 1])
+    with b1:
+        target_src = st.radio(
+            "Projected Sₜ source",
+            ["ML intrinsic (point)", "ML p90 (bull)", "DCF fair value", "Custom"],
+            key="bridge_src",
+        )
+    default_target = {
+        "ML intrinsic (point)": result.point,
+        "ML p90 (bull)": result.high,
+        "DCF fair value": dcf_quick.intrinsic_per_share,
+        "Custom": result.point,
+    }[target_src]
+    with b2:
+        projected_ST = st.number_input("Projected Sₜ ($)", value=float(round(default_target, 2)),
+                                       min_value=0.01, step=1.0, key="bridge_target")
+
+    st.markdown(
+        f"Projected **Sₜ = ${projected_ST:,.2f}** vs spot **${spot:,.2f}** "
+        f"→ implied move **{(projected_ST / spot - 1) * 100:+.1f}%** over {T_exp * 365:.0f} days."
+    )
+
+    side = "call" if projected_ST >= spot else "put"
+    scan_df = chain.calls if side == "call" else chain.puts
+    rows = []
+    if not scan_df.empty:
+        for _, r_ in scan_df.iterrows():
+            mkt = float(r_.get("lastPrice") or 0.0)
+            if mkt <= 0:
+                mid_bid, mid_ask = float(r_.get("bid") or 0.0), float(r_.get("ask") or 0.0)
+                mkt = (mid_bid + mid_ask) / 2 if (mid_bid or mid_ask) else 0.0
+            if mkt <= 0:
+                continue
+            k = float(r_["strike"])
+            iv_row = float(r_.get("impliedVolatility") or vol_in) or vol_in
+            e = deriv_mod.bridge_call_edge(
+                projected_ST=projected_ST, strike=k, T=T_exp, r=rf_rate,
+                market_price=mkt, sigma=iv_row, spot=spot, kind=side,
+            )
+            rows.append({
+                "Strike": k,
+                "Premium": round(mkt, 2),
+                "IV %": round(iv_row * 100, 1),
+                "P(ITM) at target": round(e.prob_itm, 3) if e.prob_itm == e.prob_itm else None,
+                "PV of payoff @ Sₜ": round(e.expected_payoff * float(np.exp(-rf_rate * T_exp)), 2),
+                "Edge ($)": round(e.edge, 2),
+                "Edge (x premium)": round(e.edge / mkt, 2) if mkt else None,
+                "Verdict": e.verdict,
+            })
+
+    if rows:
+        edge_df = pd.DataFrame(rows).sort_values("Edge ($)", ascending=False)
+        best = edge_df.iloc[0]
+        st.success(
+            f"Best **{side}** by model edge: strike **${best['Strike']:.2f}** — "
+            f"premium **${best['Premium']:.2f}**, edge **${best['Edge ($)']:.2f}** "
+            f"({best['Edge (x premium)']:.2f}× premium) — _{best['Verdict']}_."
+        )
+        st.dataframe(edge_df, width="stretch", hide_index=True, height=300)
+        st.caption(
+            "⚠️ Edge is a point-estimate payoff at the projected target, not a risk-adjusted "
+            "expectation — it ignores the full terminal distribution and assumes the target "
+            "is reached exactly at expiry. Treat it as a screen, not a signal."
+        )
+    else:
+        st.info("No priced contracts available on this chain to score.")
+
+    st.divider()
+
+    # ── Futures cost-of-carry ────────────────────────────────────────────────
+    st.markdown('<div class="section-header">📦 Futures Cost-of-Carry</div>', unsafe_allow_html=True)
+    st.latex(r"F = S \cdot e^{(r + s - c)\,T}")
+
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        f_spot = st.number_input("Spot (S)", value=float(round(spot, 2)), min_value=0.01,
+                                 step=1.0, key="fut_S")
+    with f2:
+        f_T = st.slider("Tenor T (years)", 0.05, 3.0, 1.0, 0.05, key="fut_T")
+    with f3:
+        storage_c = st.number_input("Storage cost s (annual)", value=0.0, min_value=0.0,
+                                    max_value=0.5, step=0.005, format="%.3f", key="fut_s")
+    with f4:
+        conv_y = st.number_input("Convenience yield c (annual)", value=0.0, min_value=0.0,
+                                 max_value=0.5, step=0.005, format="%.3f", key="fut_c")
+
+    fut = deriv_mod.futures_fair_value(f_spot, rf_rate, f_T, storage_c, conv_y)
+    market_fut = st.number_input("Observed futures price (optional)", value=0.0,
+                                 min_value=0.0, step=1.0, key="fut_mkt")
+
+    u1, u2, u3 = st.columns(3)
+    u1.markdown(metric_card("Fair Value (F)", f"${fut.fair_value:,.2f}"), unsafe_allow_html=True)
+    u2.markdown(metric_card("Basis (F − S)", f"${fut.basis:,.2f}", sub=True), unsafe_allow_html=True)
+    u3.markdown(metric_card("Net Carry (r + s − c)", f"{fut.annualized_carry * 100:.2f}%", sub=True),
+                unsafe_allow_html=True)
+
+    if market_fut > 0:
+        mis = fut.mispricing(market_fut)
+        state = "contango vs fair value" if mis > 0 else "backwardation vs fair value"
+        st.info(f"Observed **${market_fut:,.2f}** is **${mis:+,.2f}** off fair value — {state}.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 11 — REPORT
+# ══════════════════════════════════════════════════════════════════════════════
+with tabs[10]:
     st.markdown('<div class="section-header">📄 One-Click Equity Research Report</div>', unsafe_allow_html=True)
     st.caption(
         "Generate a formatted PDF summary: ticker breakdown, valuation range, signal, "

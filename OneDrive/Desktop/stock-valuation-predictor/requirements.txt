@@ -12,6 +12,10 @@ matplotlib>=3.8.0
 shap>=0.44.0             # SHAP waterfall / feature attribution
 lime>=0.2.0.1            # optional secondary local explainer
 
+# ── Quant execution layer ────────────────────────────────────────────────────
+hmmlearn>=0.3.0          # Hidden Markov Model market-regime classifier
+                         # (falls back to a sklearn GaussianMixture if absent)
+
 # ── Live data pipelines ──────────────────────────────────────────────────────
 yfinance>=0.2.40         # live prices, market cap, history, peer multiples
 fredapi>=0.5.1           # real-time FRED macro (yield curve, CPI, rates)

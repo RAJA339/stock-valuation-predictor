@@ -47,6 +47,43 @@ earnings-call sentiment — then **explains** and **stress-tests** that estimate
   a persistent **SQLite** store, upgradeable to **PostgreSQL** via
   `DATABASE_URL`) speeds up repeat lookups of parsed SEC filings.
 
+### Quant Execution Layer
+- **Market-regime classifier** — a Hidden Markov Model over VIX and the yield
+  curve labels the tape *Calm / Neutral / Stress / Crisis* and scales conviction
+  on every valuation signal accordingly (falls back to a Gaussian mixture, then
+  to rules, when `hmmlearn` is unavailable).
+- **Technical entry filters** — 200-day SMA trend gate, RSI bullish divergence,
+  volume point-of-control and ATR, so a cheap stock is only actionable once
+  price action confirms.
+- **Forensic guardrails** — Piotroski F-Score, Altman Z-Score and Beneish
+  M-Score computed straight from SEC EDGAR facts, plus Form 4 insider flow and
+  short interest.
+- **Relative-return model** — a second XGBoost model trained on forward excess
+  return versus a benchmark, complementing the absolute intrinsic estimate.
+- **Margin-of-safety screener** — ranks a configurable universe and surfaces the
+  top decile by discount to intrinsic value.
+- **Position sizing** — fractional Kelly from the Monte-Carlo win probability,
+  blended with volatility parity and floored by ATR / p10 stop-loss levels.
+- **Filing divergence** — TF-IDF cosine similarity between consecutive 10-K and
+  10-Q filings highlights language that materially changed quarter over quarter.
+
+### Derivatives — Options & Futures
+- **Live option chains** — strikes, bid/ask, open interest and implied
+  volatility via `yfinance.Ticker.option_chain(date)`, with a Black-Scholes
+  synthetic chain (volatility smile included) as an offline fallback.
+- **Pricing engines** — analytic **Black-Scholes-Merton** with a continuous
+  dividend yield, a **Cox-Ross-Rubinstein binomial tree** supporting American
+  early exercise, and a **GBM Monte-Carlo** cross-check.
+- **Full Greeks** — Δ, Γ, Θ (per calendar day), Vega (per vol point) and ρ (per
+  1% rate), displayed beside the theoretical value.
+- **Implied volatility solver** — Brent root-finder on the market premium, with
+  a bisection fallback when SciPy is absent.
+- **Valuation → options bridge** — treats the ML intrinsic target (or the DCF
+  fair value) as the projected underlying at expiry `Sₜ`, discounts the
+  resulting payoff back to today and ranks the chain to flag mispriced LEAPs.
+- **Futures cost-of-carry** — fair value `F = S·e^{(r+s−c)T}` with basis, net
+  carry and a contango/backwardation read against an observed futures price.
+
 ---
 
 ## 🗂️ Project structure
@@ -65,14 +102,24 @@ stock-valuation-predictor/
     │   ├── market.py          # yfinance / Alpha Vantage live data
     │   ├── macro.py           # FRED + BLS macro indicators
     │   ├── sentiment.py       # FinBERT + lexicon fallback
+    │   ├── insider.py         # Form 4 insider flow + short interest
+    │   ├── filings_nlp.py     # TF-IDF divergence between filings
+    │   ├── options.py         # live option chains (+ synthetic fallback)
     │   └── storage.py         # SQLite / PostgreSQL persistent cache
     ├── models/
     │   ├── valuation.py       # XGBoost point + quantile + Monte-Carlo
     │   ├── explain.py         # SHAP / LIME attribution
     │   ├── dcf.py             # DCF + Monte-Carlo scenario engine
-    │   └── backtest.py        # 1/3/5-year backtesting engine
+    │   ├── backtest.py        # 1/3/5-year backtesting engine
+    │   ├── regime.py          # HMM market-regime classifier
+    │   ├── relative.py        # forward excess-return model
+    │   ├── sizing.py          # fractional Kelly + vol parity + stops
+    │   └── derivatives.py     # Black-Scholes / binomial / MC / futures
     └── analytics/
-        └── peers.py           # peer-group benchmarking
+        ├── peers.py           # peer-group benchmarking
+        ├── technical.py       # SMA / RSI / volume POC / ATR filters
+        ├── quality.py         # Piotroski F, Altman Z, Beneish M
+        └── screener.py        # margin-of-safety universe ranking
 ```
 
 ---
