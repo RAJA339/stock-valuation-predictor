@@ -242,6 +242,23 @@ full = reports.build_report(
 )
 check("full report is larger than the summary-only report", len(full) > len(report))
 
+# The overflow bug: bare strings handed to ReportLab are drawn on one line and
+# run past the cell edge. Every cell must be a wrapping flowable.
+from reportlab.platypus import Paragraph as _RLPara
+_probe = reports._table(
+    [["Signal", "Reading"],
+     ["Regime Note",
+      "Low volatility, positively sloped curve — value signals reliable, and this "
+      "sentence is deliberately far longer than the column is wide."]],
+    [1.6 * reports.inch, 4.1 * reports.inch])
+check("table cells are wrapping flowables, not raw strings",
+      all(isinstance(c, _RLPara) for row in _probe._cellvalues for c in row))
+_w, _h = _probe.wrap(5.7 * reports.inch, 500)
+check("a long cell grows the row instead of overflowing", _h > 30)
+check("table never exceeds the width it was given", _w <= 5.75 * reports.inch)
+check("numeric columns are detected", reports._numeric("$1,234.50") and reports._numeric("-12.3%"))
+check("text columns are not", not reports._numeric("Better than chance"))
+
 # Text fallback must carry the same sections as the PDF.
 _had_reportlab = reports._HAS_REPORTLAB
 reports._HAS_REPORTLAB = False

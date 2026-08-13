@@ -28,20 +28,37 @@ try:
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import inch
+    from reportlab.lib.enums import TA_RIGHT
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfgen import canvas as _canvas
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable,
-        Image, PageBreak,
+        Image, PageBreak, KeepTogether,
     )
 
     _HAS_REPORTLAB = True
 except Exception:  # pragma: no cover
     _HAS_REPORTLAB = False
 
-# Palette (hex) reused from the app theme.
-_NAVY = "#0D1B2A"
-_TEAL = "#028090"
-_GREEN = "#02C39A"
-_PANEL = "#1E293B"
+# ── Print palette ────────────────────────────────────────────────────────────
+# The app renders on obsidian; paper is the opposite problem. These are the
+# same four hues re-valued for white stock, where a light emerald or champagne
+# would be illegible: ink near-black, accents dark enough to hold on white.
+_INK        = "#14181C"   # body text
+_INK_SOFT   = "#4A5158"   # secondary text
+_RULE       = "#D6D2CA"   # hairlines
+_BAND       = "#F6F4F0"   # alternating row (warm, not blue-grey)
+_HEAD_BG    = "#121417"   # table header — obsidian
+_HEAD_FG    = "#F4F2ED"   # table header type — pearl
+_EMERALD    = "#0E6B50"   # positive / brand rule
+_GARNET     = "#9E3B33"   # negative — darkened for print
+_CHAMPAGNE  = "#8A6D2F"   # accent type on white
+
+# Legacy aliases retained for any caller still referencing them.
+_NAVY, _TEAL, _GREEN, _PANEL = _HEAD_BG, _EMERALD, _EMERALD, _INK
+
+_FONT = "Helvetica"
+_FONT_B = "Helvetica-Bold"
 
 
 def _fmt(v, kind="num"):
@@ -176,24 +193,80 @@ def build_report(
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=letter,
-        topMargin=0.7 * inch, bottomMargin=0.7 * inch,
+        topMargin=0.78 * inch, bottomMargin=0.85 * inch,
         leftMargin=0.75 * inch, rightMargin=0.75 * inch,
+        title=f"{ticker} — Equity Research", author="Intrinsic Stock Valuation Predictor",
+        subject=f"Equity research summary for {company}",
     )
-    styles = getSampleStyleSheet()
-    title = ParagraphStyle("t", parent=styles["Title"], textColor=colors.HexColor(_TEAL), fontSize=20)
-    h2 = ParagraphStyle("h2", parent=styles["Heading2"], textColor=colors.HexColor(_NAVY), fontSize=13)
-    body = ParagraphStyle("b", parent=styles["BodyText"], fontSize=9.5, leading=13)
-    small = ParagraphStyle("s", parent=styles["BodyText"], fontSize=8, textColor=colors.grey)
+    avail = doc.width
+
+    title = ParagraphStyle("t", fontName=_FONT_B, fontSize=21, leading=24,
+                           textColor=colors.HexColor(_INK), spaceAfter=0)
+    kicker = ParagraphStyle("k", fontName=_FONT_B, fontSize=8, leading=10,
+                            textColor=colors.HexColor(_EMERALD), spaceAfter=4)
+    sub = ParagraphStyle("sub", fontName=_FONT, fontSize=9.5, leading=12.5,
+                         textColor=colors.HexColor(_INK_SOFT))
+    h2 = ParagraphStyle("h2", fontName=_FONT_B, fontSize=10.5, leading=13,
+                        textColor=colors.HexColor(_INK),
+                        spaceBefore=15, spaceAfter=7)
+    body = ParagraphStyle("b", fontName=_FONT, fontSize=9, leading=12.6,
+                          textColor=colors.HexColor(_INK), spaceAfter=4)
+    small = ParagraphStyle("s", fontName=_FONT, fontSize=7.6, leading=10,
+                           textColor=colors.HexColor(_INK_SOFT))
+
+    # Section numbering, so a reader can cite "see §4".
+    counter = {"n": 0}
+
+    def section(label: str):
+        counter["n"] += 1
+        return Paragraph(f'<font color="{_EMERALD}">{counter["n"]}.</font>&nbsp;&nbsp;'
+                         f'{label.upper()}', h2)
 
     story = []
-    story.append(Paragraph("Intrinsic Stock Valuation — Equity Research Summary", title))
-    story.append(Paragraph(f"{company} ({ticker}) &nbsp;·&nbsp; {date.today():%B %d, %Y}", small))
+
+    # ── Masthead ─────────────────────────────────────────────────────────────
+    story.append(Paragraph("EQUITY RESEARCH — INTRINSIC VALUATION", kicker))
+    story.append(Paragraph(f"{company} <font color='{_INK_SOFT}'>({ticker})</font>", title))
+    story.append(Spacer(1, 3))
+    story.append(Paragraph(
+        f"{date.today():%d %B %Y}&nbsp;&nbsp;·&nbsp;&nbsp;"
+        f"Last price {_fmt(market_price, 'usd')}&nbsp;&nbsp;·&nbsp;&nbsp;"
+        f"Model-derived, machine-generated", sub))
+    story.append(Spacer(1, 7))
+    story.append(_rule(_EMERALD, 1.6, 4))
+    story.append(_rule(_RULE, 0.5, 12))
+
+    # ── At a glance ──────────────────────────────────────────────────────────
+    _sig = signal_text.replace("🟢", "").replace("🔴", "").replace("🟡", "").strip()
+    _upside = ((valuation.get("point") or 0) / market_price - 1) if market_price else None
+    glance = [
+        ["Market Price", "Intrinsic Value", "Implied Upside", "Signal"],
+        [_fmt(market_price, "usd"), _fmt(valuation.get("point"), "usd"),
+         _fmt(_upside, "pct") if _upside is not None else "N/A", _sig],
+    ]
+    gt = Table(glance, colWidths=[avail / 4.0] * 4, hAlign="LEFT")
+    gt.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, 0), _FONT_B),
+        ("FONTSIZE", (0, 0), (-1, 0), 7),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(_INK_SOFT)),
+        ("FONTNAME", (0, 1), (-1, 1), _FONT_B),
+        ("FONTSIZE", (0, 1), (-1, 1), 15),
+        ("TEXTCOLOR", (0, 1), (-1, 1), colors.HexColor(_INK)),
+        ("TEXTCOLOR", (2, 1), (2, 1),
+         colors.HexColor(_EMERALD if (_upside or 0) >= 0 else _GARNET)),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 4),
+        ("TOPPADDING", (0, 1), (-1, 1), 0),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("LINEAFTER", (0, 0), (-2, -1), 0.5, colors.HexColor(_RULE)),
+        ("RIGHTPADDING", (0, 0), (-2, -1), 12),
+        ("LEFTPADDING", (1, 0), (-1, -1), 12),
+    ]))
+    story.append(gt)
     story.append(Spacer(1, 6))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor(_TEAL)))
-    story.append(Spacer(1, 10))
+    story.append(_rule(_RULE, 0.5, 10))
 
     # ── Valuation summary ────────────────────────────────────────────────────
-    story.append(Paragraph("Valuation Summary", h2))
+    story.append(section("Valuation Summary"))
     val_rows = [
         ["Metric", "Value"],
         ["Current Market Price", _fmt(market_price, "usd")],
@@ -213,7 +286,7 @@ def build_report(
 
     # ── Fundamentals / extracted features ────────────────────────────────────
     if fundamentals:
-        story.append(Paragraph("Company Fundamentals", h2))
+        story.append(section("Company Fundamentals"))
         rows = [["Item", "Value"]]
         for label, key, kind in (
             ("Sector", "sector", "raw"),
@@ -237,7 +310,7 @@ def build_report(
             story.append(Spacer(1, 12))
 
     if features:
-        story.append(Paragraph("Model Input Features", h2))
+        story.append(section("Model Input Features"))
         rows = [["Feature", "Value"]]
         pct_like = {
             "roe", "roa", "fcf_yield", "profit_margin", "revenue_yoy", "revenue_qoq",
@@ -253,7 +326,7 @@ def build_report(
 
     # ── Feature impacts ──────────────────────────────────────────────────────
     if attribution is not None and not attribution.empty:
-        story.append(Paragraph("Top Feature Impacts (SHAP)", h2))
+        story.append(section("Top Feature Impacts (SHAP)"))
         rows = [["Feature", "Value", "Contribution to Value"]]
         for _, r in attribution.head(8).iterrows():
             rows.append([str(r["feature"]), _fmt(r["value"]), f"{r['contribution']:+.2f}"])
@@ -262,7 +335,7 @@ def build_report(
 
     # ── Peer benchmarking ────────────────────────────────────────────────────
     if peers is not None and not peers.empty:
-        story.append(Paragraph("Peer Group Benchmarking", h2))
+        story.append(section("Peer Group Benchmarking"))
         cols = ["Ticker", "EV/EBITDA", "P/E", "Debt/Equity", "Profit Margin"]
         rows = [cols]
         for _, r in peers[cols].head(6).iterrows():
@@ -281,8 +354,8 @@ def build_report(
     # ── Technical chart + indicators ─────────────────────────────────────────
     if chart_png or indicators is not None or indicator_accuracy:
         story.append(PageBreak())
-        story.append(Paragraph(
-            f"Technical Analysis{f' — {chart_interval} bars' if chart_interval else ''}", h2))
+        story.append(section(
+            f"Technical Analysis{f' — {chart_interval} bars' if chart_interval else ''}"))
 
         if chart_png:
             try:
@@ -311,7 +384,7 @@ def build_report(
             story.append(Spacer(1, 12))
 
         if indicator_accuracy:
-            story.append(Paragraph("Measured Signal Accuracy", h2))
+            story.append(section("Measured Signal Accuracy"))
             story.append(Paragraph(
                 f"Each indicator's call is recomputed at every bar and scored against the "
                 f"actual move {accuracy_horizon or 6} bars later. These are realised hit rates "
@@ -338,7 +411,7 @@ def build_report(
 
     # ── Backtesting ──────────────────────────────────────────────────────────
     if backtest:
-        story.append(Paragraph("Signal Backtest", h2))
+        story.append(section("Signal Backtest"))
         rows = [["Horizon", "Signals", "Hit Rate", "Avg Fwd Return", "Strategy", "Buy & Hold"]]
         for hr in backtest:
             rows.append([
@@ -354,7 +427,7 @@ def build_report(
 
     # ── Execution & timing ───────────────────────────────────────────────────
     if regime is not None or technical is not None:
-        story.append(Paragraph("Execution &amp; Timing", h2))
+        story.append(section("Execution &amp; Timing"))
         rows = [["Signal", "Reading"]]
         if regime is not None:
             rows += [
@@ -383,7 +456,7 @@ def build_report(
 
     # ── Position sizing ──────────────────────────────────────────────────────
     if sizing is not None:
-        story.append(Paragraph("Position Sizing &amp; Risk", h2))
+        story.append(section("Position Sizing &amp; Risk"))
         rows = [
             ["Metric", "Value"],
             ["Win Probability (Monte-Carlo)", _fmt(_attr(sizing, "win_probability"), "pct")],
@@ -401,7 +474,7 @@ def build_report(
 
     # ── Forensic guardrails ──────────────────────────────────────────────────
     if quality is not None or insider is not None:
-        story.append(Paragraph("Guardrails — Quality, Distress &amp; Insider Flow", h2))
+        story.append(section("Guardrails — Quality, Distress &amp; Insider Flow"))
         rows = [["Check", "Result"]]
         if quality is not None:
             piotroski = _attr(quality, "piotroski")
@@ -432,7 +505,7 @@ def build_report(
 
     # ── Screener ─────────────────────────────────────────────────────────────
     if screener is not None and not screener.empty:
-        story.append(Paragraph("Margin-of-Safety Screener", h2))
+        story.append(section("Margin-of-Safety Screener"))
         cols = [c for c in screener.columns if c.lower() != "index"][:5]
         rows = [[str(c) for c in cols]]
         for _, r in screener.head(10).iterrows():
@@ -442,7 +515,7 @@ def build_report(
 
     # ── Filing divergence ────────────────────────────────────────────────────
     if filings is not None and _attr(filings, "similarity") is not None:
-        story.append(Paragraph("Filing Divergence (10-K / 10-Q)", h2))
+        story.append(section("Filing Divergence (10-K / 10-Q)"))
         rows = [
             ["Metric", "Value"],
             ["Cosine Similarity vs Prior Filing", _fmt(_attr(filings, "similarity"))],
@@ -461,7 +534,7 @@ def build_report(
 
     # ── Options & futures ────────────────────────────────────────────────────
     if options:
-        story.append(Paragraph("Options &amp; Futures", h2))
+        story.append(section("Options &amp; Futures"))
         rows = [["Metric", "Value"]]
         for label, key, kind in (
             ("Expiry", "expiry", "raw"),
@@ -510,7 +583,7 @@ def build_report(
 
     # ── Macro ────────────────────────────────────────────────────────────────
     if macro:
-        story.append(Paragraph("Macro Backdrop", h2))
+        story.append(section("Macro Backdrop"))
         rows = [
             ["Indicator", "Level"],
             ["CPI", _fmt(macro.get("cpi"))],
@@ -520,39 +593,198 @@ def build_report(
         story.append(_table(rows, [2.7 * inch, 3.0 * inch]))
         story.append(Spacer(1, 12))
 
-    story.append(Spacer(1, 10))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
-    story.append(
-        Paragraph(
-            "Generated by the Intrinsic Stock Valuation Predictor · Webster University — "
-            "MS Business Analytics. For educational purposes only. Not financial advice.",
-            small,
-        )
-    )
+    # ── Basis & disclaimer ───────────────────────────────────────────────────
+    story.append(Spacer(1, 14))
+    story.append(_rule(_RULE, 0.5, 8))
+    story.append(section("Basis of Preparation & Disclaimer"))
+    story.append(Paragraph(
+        "<b>Basis.</b> Fundamentals are taken from SEC EDGAR XBRL company facts "
+        "(10-K, 20-F, 40-F and 10-Q as filed). Prices, volumes and option chains come "
+        "from public market data feeds and may be delayed. Macro series are sourced "
+        "from FRED and BLS. The intrinsic value is produced by a gradient-boosted "
+        "regression trained on synthetic data, reported as a p10–p90 range rather "
+        "than a point, and is a model output — not a price target.", body))
+    story.append(Paragraph(
+        "<b>Limitations.</b> Where a filing does not tag a concept this parser "
+        "recognises, the corresponding input is absent and any ratio built on it is "
+        "omitted. Backtested and measured-accuracy figures are in-sample statistics on "
+        "the data shown, carry sampling error, and exclude commission, spread, slippage "
+        "and financing. Past performance does not indicate future results.", body))
+    story.append(Paragraph(
+        "<b>Disclaimer.</b> This document is generated automatically for educational "
+        "and academic purposes. It is not investment advice, not a recommendation or "
+        "solicitation to buy or sell any security, and has not been prepared in "
+        "accordance with regulatory requirements for investment research. No "
+        "representation is made as to its accuracy or completeness. Recipients should "
+        "conduct their own analysis and consult a qualified financial adviser.", body))
+    story.append(Spacer(1, 8))
+    story.append(Paragraph(
+        f"Generated by the Intrinsic Stock Valuation Predictor · Webster University — "
+        f"MS Business Analytics · {date.today():%d %b %Y}", small))
 
-    doc.build(story)
+    meta = {"ticker": ticker, "company": company, "date": f"{date.today():%d %b %Y}"}
+
+    def _mk_canvas(*args, **kwargs):
+        return _NumberedCanvas(*args, meta=meta, **kwargs)
+
+    doc.build(story, canvasmaker=_mk_canvas)
     return buf.getvalue()
 
 
-def _table(rows, col_widths):
-    t = Table(rows, colWidths=col_widths, hAlign="LEFT")
-    t.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(_NAVY)),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#EEF2F7")]),
-                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-            ]
-        )
-    )
+# Cell styles are built once and reused — ParagraphStyle construction is not
+# free and a full report renders a few hundred cells.
+def _cell_styles():
+    return {
+        "head": ParagraphStyle("th", fontName=_FONT_B, fontSize=7.6, leading=9.5,
+                               textColor=colors.HexColor(_HEAD_FG),
+                               spaceBefore=0, spaceAfter=0),
+        "body": ParagraphStyle("td", fontName=_FONT, fontSize=8.2, leading=10.6,
+                               textColor=colors.HexColor(_INK),
+                               spaceBefore=0, spaceAfter=0),
+        "label": ParagraphStyle("tdl", fontName=_FONT_B, fontSize=8.2, leading=10.6,
+                                textColor=colors.HexColor(_INK),
+                                spaceBefore=0, spaceAfter=0),
+        "num": ParagraphStyle("tdn", fontName=_FONT, fontSize=8.2, leading=10.6,
+                              alignment=TA_RIGHT, textColor=colors.HexColor(_INK),
+                              spaceBefore=0, spaceAfter=0),
+        "head_num": ParagraphStyle("thn", fontName=_FONT_B, fontSize=7.6, leading=9.5,
+                                   alignment=TA_RIGHT, textColor=colors.HexColor(_HEAD_FG),
+                                   spaceBefore=0, spaceAfter=0),
+    }
+
+
+_CELL = None
+
+
+def _numeric(text: str) -> bool:
+    """Does this cell hold a figure? Numeric columns are right-aligned."""
+    t = str(text).strip().lstrip("+-$").rstrip("%BKMT").replace(",", "").replace("/", "")
+    if not t:
+        return False
+    try:
+        float(t.split()[0]) if t.split() else float(t)
+        return True
+    except ValueError:
+        return False
+
+
+def _table(rows, col_widths, first_col_label: bool = True):
+    """
+    Build a table whose cells wrap.
+
+    Passing bare strings to ReportLab is what caused text to run past the cell
+    edge: a plain string is drawn on one line with no knowledge of the column
+    width. Wrapping every cell in a Paragraph lets the layout engine break the
+    line, which is why long values like the regime note now stay inside the
+    rule.
+    """
+    global _CELL
+    if _CELL is None:
+        _CELL = _cell_styles()
+
+    # Decide each column's alignment from its body cells first, so the header
+    # can match it. A right-aligned figure under a left-aligned label reads as
+    # a misalignment rather than a deliberate choice.
+    n_cols = max(len(r) for r in rows)
+    body_rows = rows[1:]
+    right_col = []
+    for c in range(n_cols):
+        vals = [str(r[c]) for r in body_rows if c < len(r) and r[c] not in (None, "")]
+        numeric = [v for v in vals if _numeric(v)]
+        right_col.append(bool(vals) and len(numeric) >= max(1, len(vals) * 0.6)
+                         and not (c == 0 and first_col_label))
+
+    data = []
+    for r, row in enumerate(rows):
+        out = []
+        for c, val in enumerate(row):
+            text = "" if val is None else str(val)
+            if r == 0:
+                style = _CELL["head_num"] if right_col[c] else _CELL["head"]
+            elif c == 0 and first_col_label:
+                style = _CELL["label"]
+            elif right_col[c]:
+                style = _CELL["num"]
+            else:
+                style = _CELL["body"]
+            out.append(Paragraph(text.replace("&", "&amp;"), style))
+        data.append(out)
+
+    t = Table(data, colWidths=col_widths, hAlign="LEFT", repeatRows=1)
+    t.setStyle(TableStyle([
+        # Header: obsidian band, no vertical rules — the eye follows rows.
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(_HEAD_BG)),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.9, colors.HexColor(_EMERALD)),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor(_BAND)]),
+        ("LINEBELOW", (0, 1), (-1, -2), 0.25, colors.HexColor(_RULE)),
+        ("LINEBELOW", (0, -1), (-1, -1), 0.7, colors.HexColor(_RULE)),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 7),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+    ]))
     return t
+
+
+def _rule(colour=_RULE, thickness=0.6, space_after=8):
+    return HRFlowable(width="100%", thickness=thickness,
+                      color=colors.HexColor(colour), spaceAfter=space_after)
+
+
+class _NumberedCanvas(_canvas.Canvas):
+    """
+    Two-pass canvas so the footer can print "Page 2 of 7".
+
+    Pages are buffered on the first pass and the total is only known once the
+    document is complete, which is why the count is stamped on the second.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self._meta = kwargs.pop("meta", {})
+        super().__init__(*args, **kwargs)
+        self._saved = []
+
+    def showPage(self):
+        self._saved.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        total = len(self._saved)
+        for state in self._saved:
+            self.__dict__.update(state)
+            self._furniture(total)
+            super().showPage()
+        super().save()
+
+    def _furniture(self, total):
+        w, h = letter
+        m = 0.75 * inch
+        meta = self._meta
+
+        # Running header — suppressed on page 1, which carries the masthead.
+        if self._pageNumber > 1:
+            self.setFont(_FONT_B, 7.5)
+            self.setFillColor(colors.HexColor(_INK))
+            self.drawString(m, h - 0.5 * inch, meta.get("ticker", ""))
+            self.setFont(_FONT, 7.5)
+            self.setFillColor(colors.HexColor(_INK_SOFT))
+            self.drawString(m + 0.42 * inch, h - 0.5 * inch, meta.get("company", ""))
+            self.drawRightString(w - m, h - 0.5 * inch, meta.get("date", ""))
+            self.setStrokeColor(colors.HexColor(_RULE))
+            self.setLineWidth(0.5)
+            self.line(m, h - 0.56 * inch, w - m, h - 0.56 * inch)
+
+        # Footer rule + page count + standing disclaimer.
+        self.setStrokeColor(colors.HexColor(_RULE))
+        self.setLineWidth(0.5)
+        self.line(m, 0.62 * inch, w - m, 0.62 * inch)
+        self.setFont(_FONT, 7)
+        self.setFillColor(colors.HexColor(_INK_SOFT))
+        self.drawString(m, 0.46 * inch,
+                        "Educational use only. Not investment advice.")
+        self.drawRightString(w - m, 0.46 * inch,
+                             f"Page {self._pageNumber} of {total}")
 
 
 def _text_report(
