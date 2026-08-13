@@ -150,7 +150,10 @@ def implied_volatility(market_price, S, K, T, r, q=0.0, kind="call") -> Optional
     intrinsic = max(0.0, (S - K) if kind == "call" else (K - S))
     if market_price <= intrinsic or T <= 0:
         return None
-    f = lambda sig: black_scholes(S, K, T, r, sig, q, kind).price - market_price
+
+    def f(sig):
+        return black_scholes(S, K, T, r, sig, q, kind).price - market_price
+
     try:
         if _HAS_SCIPY:
             return float(brentq(f, 1e-4, 6.0, maxiter=200))

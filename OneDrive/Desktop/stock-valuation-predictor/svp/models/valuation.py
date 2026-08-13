@@ -18,7 +18,6 @@ artifact rather than train on the fly.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 import pandas as pd

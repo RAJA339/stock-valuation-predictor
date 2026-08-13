@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512"
+     role="img" aria-label="Intrinsic — quantitative financial analytics">
+  <title>Intrinsic</title>
+  <desc>A geometric Greek delta standing on a probability bell curve, with a
+        rising trendline through its interior.</desc>
+
+  <defs>
+    <linearGradient id="ce" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0%"  stop-color="#00E676"/>
+      <stop offset="100%" stop-color="#00F0FF"/>
+    </linearGradient>
+    <linearGradient id="ceDim" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0%"  stop-color="#00E676" stop-opacity=".42"/>
+      <stop offset="100%" stop-color="#00F0FF" stop-opacity=".42"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="#0B0F19"/>
+
+  <!-- Bell curve: the delta stands on a distribution, not a plain baseline -->
+  <path d="M72 356 C 138 356, 168 216, 256 216 C 344 216, 374 356, 440 356"
+        fill="none" stroke="url(#ceDim)" stroke-width="11" stroke-linecap="round"/>
+
+  <!-- Delta — closed triangle, the mark itself -->
+  <path d="M256 128 L 374 356 L 138 356 Z"
+        fill="none" stroke="url(#ce)" stroke-width="24"
+        stroke-linejoin="round"/>
+
+  <!-- Trendline rising inside the delta -->
+  <path d="M176 330 L 226 296 L 268 312 L 330 250"
+        fill="none" stroke="#00F0FF" stroke-width="14"
+        stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M300 250 L 330 250 L 330 280"
+        fill="none" stroke="#00F0FF" stroke-width="14"
+        stroke-linejoin="round" stroke-linecap="round"/>
+
+  <!-- Point estimate on the curve's peak -->
+  <circle cx="256" cy="216" r="12" fill="#0B0F19" stroke="url(#ce)" stroke-width="9"/>
+</svg>

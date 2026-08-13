@@ -92,7 +92,8 @@ def _form4_net(cik: str, accession: str) -> Optional[float]:
         m = re.search(r'href="([^"]+\.xml)"', idx)
         if not m:
             return None
-        xml_url = "https://www.sec.gov" + m.group(1) if m.group(1).startswith("/") else url + "/" + m.group(1).split("/")[-1]
+        xml_url = ("https://www.sec.gov" + m.group(1) if m.group(1).startswith("/")
+                   else url + "/" + m.group(1).split("/")[-1])
         xml = requests.get(xml_url, headers=_HEADERS, timeout=10).text
     except Exception:
         return None

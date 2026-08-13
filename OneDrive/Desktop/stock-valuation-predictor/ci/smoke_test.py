@@ -332,9 +332,12 @@ check("signal strip renders", charts.signal_strip(_iset)[:4] == b"\x89PNG")
 check("chart handles an empty frame", charts.render(pd.DataFrame(), "AAPL", "15m") == b"")
 
 # ── SEC coverage: the parser must not reject well-formed filings ─────────────
+
+
 def _facts(tax="us-gaap", concept="StockholdersEquity", form="10-K", unit="USD", val=6e10):
     return {"facts": {tax: {concept: {"units": {unit: [
         {"end": "2025-12-31", "val": val, "form": form, "filed": "2026-02-01"}]}}}}}
+
 
 # Foreign private issuers file 20-F / 40-F, not 10-K. Excluding those forms
 # shut every non-US-domiciled listing out of the app.

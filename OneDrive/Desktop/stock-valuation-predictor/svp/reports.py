@@ -26,14 +26,13 @@ import pandas as pd
 try:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import inch
     from reportlab.lib.enums import TA_RIGHT
-    from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfgen import canvas as _canvas
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable,
-        Image, PageBreak, KeepTogether,
+        Image, PageBreak,
     )
 
     _HAS_REPORTLAB = True
@@ -401,8 +400,8 @@ def build_report(
                     a.name, str(a.n_signals),
                     "—" if nan else f"{a.hit_rate * 100:.1f}%",
                     "—" if nan else f"{a.ci_low * 100:.0f}–{a.ci_high * 100:.0f}%",
-                    "—" if a.avg_forward_return != a.avg_forward_return
-                        else f"{a.avg_forward_return * 100:+.3f}%",
+                    ("—" if a.avg_forward_return != a.avg_forward_return
+                     else f"{a.avg_forward_return * 100:+.3f}%"),
                     a.verdict,
                 ])
             story.append(_table(rows, [1.6 * inch, 0.65 * inch, 0.75 * inch,
@@ -587,7 +586,9 @@ def build_report(
         rows = [
             ["Indicator", "Level"],
             ["CPI", _fmt(macro.get("cpi"))],
-            ["Fed Funds Rate", _fmt(macro.get("fed_funds"), "pct") if macro.get("fed_funds", 0) < 1 else f"{macro.get('fed_funds'):.2f}%"],
+            ["Fed Funds Rate",
+             (_fmt(macro.get("fed_funds"), "pct") if macro.get("fed_funds", 0) < 1
+              else f"{macro.get('fed_funds'):.2f}%")],
             ["10y–2y Yield Curve", f"{macro.get('yield_curve', 0):+.2f}"],
         ]
         story.append(_table(rows, [2.7 * inch, 3.0 * inch]))
@@ -878,9 +879,11 @@ def _text_report(
             ("Altman Zone", _attr(quality, "altman_zone")),
             ("Beneish M-Score", _fmt(_attr(quality, "beneish_m")) if quality is not None else None),
             ("Beneish Flag", _attr(quality, "beneish_flag")),
-            ("Guardrail Triggered", _yn(_call(quality, "guardrail_triggered")) if quality is not None else None),
+            ("Guardrail Triggered",
+             _yn(_call(quality, "guardrail_triggered")) if quality is not None else None),
             ("Insider Direction", _attr(insider, "net_direction")),
-            ("Short % of Float", _fmt(_attr(insider, "short_percent_float"), "pct") if insider is not None else None),
+            ("Short % of Float",
+             _fmt(_attr(insider, "short_percent_float"), "pct") if insider is not None else None),
         ])
 
     if filings is not None and _attr(filings, "similarity") is not None:

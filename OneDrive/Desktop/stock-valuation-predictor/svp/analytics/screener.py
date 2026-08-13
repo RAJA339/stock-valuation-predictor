@@ -16,7 +16,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 from ..features import build_features
@@ -46,7 +45,9 @@ def _score_one(ticker: str, vm, rm=None) -> Optional[ScreenRow]:
         feats = build_features(ticker)
         if feats is None:
             return None
-        price = feats.get("market_price") or feats["_raw"].get("market_cap", 0) / max(feats["_raw"].get("shares", 1), 1)
+        price = (feats.get("market_price")
+                 or feats["_raw"].get("market_cap", 0)
+                 / max(feats["_raw"].get("shares", 1), 1))
         if not price or price <= 0:
             return None
         res = val_mod.predict(feats, vm, n_mc=200)

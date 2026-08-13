@@ -22,7 +22,6 @@ import requests
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from . import sec
 
 _HEADERS = {"User-Agent": "StockValuationApp contact@example.com"}
 _SUBMISSIONS = "https://data.sec.gov/submissions/CIK{cik}.json"
