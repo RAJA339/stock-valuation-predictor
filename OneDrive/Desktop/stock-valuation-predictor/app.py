@@ -444,6 +444,7 @@ with tabs[2]:
         wacc=wacc, terminal_growth=tgrowth, growth_rate=ngrowth, years=int(years),
     )
     dcf_res = dcf_mod.run_dcf(dcf_in)
+    st.session_state["rep_dcf"] = dcf_res
     dcf_mc = dcf_mod.monte_carlo_dcf(dcf_in, n=4000)
 
     d1, d2, d3, d4 = st.columns(4)
@@ -548,6 +549,7 @@ with tabs[4]:
     )
 
     results = bt_mod.run_backtest(md.history)
+    st.session_state["rep_backtest"] = results
     if not results:
         st.warning("Not enough price history to backtest this ticker.")
     else:
@@ -667,6 +669,7 @@ with tabs[6]:
     facts = sec_mod.get_financials(raw["cik"]) if raw.get("cik") else {}
     with st.spinner("Computing quality & distress scores..."):
         qs = quality_mod.compute_quality(facts, raw.get("market_cap"))
+    st.session_state["rep_quality"] = qs
 
     qc1, qc2, qc3 = st.columns(3)
     with qc1:
@@ -706,6 +709,7 @@ with tabs[6]:
     st.markdown('<div class="section-header">👥 Insider Activity & Short Interest</div>', unsafe_allow_html=True)
     with st.spinner("Fetching Form 4 & short interest..."):
         ins = insider_mod.get_insider_signal(tk, raw.get("cik"))
+    st.session_state["rep_insider"] = ins
     ic1, ic2, ic3 = st.columns(3)
     ic1.metric("Insider Net Flow", ins.net_direction,
                help=f"{ins.buy_count} buy / {ins.sell_count} sell filings (Form 4)")
@@ -743,6 +747,7 @@ with tabs[7]:
 
         with st.spinner("Screening..."):
             sdf = screener_mod.screen(universe, vm, rm, progress=_cb)
+        st.session_state["rep_screener"] = sdf
         prog.empty()
 
         if sdf.empty:
@@ -791,6 +796,7 @@ with tabs[8]:
                            "Try the 'Paste two excerpts' mode to demo the analysis.")
 
     if fd is not None and fd.similarity is not None:
+        st.session_state["rep_filings"] = fd
         n1, n2, n3 = st.columns(3)
         n1.metric("Cosine Similarity", f"{fd.similarity:.3f}")
         n2.metric("Divergence", f"{fd.divergence:.3f}")
@@ -1039,6 +1045,27 @@ with tabs[9]:
         state = "contango vs fair value" if mis > 0 else "backwardation vs fair value"
         st.info(f"Observed **${market_fut:,.2f}** is **${mis:+,.2f}** off fair value — {state}.")
 
+    # Snapshot for the PDF report.
+    _opt_summary = {
+        "expiry": chain.expiry, "days_to_expiry": T_exp * 365,
+        "source": "yfinance" if chain.is_live else "synthetic", "spot": spot,
+        "kind": opt_kind, "strike": strike, "sigma": vol_in,
+        "bs_price": bs.price, "binomial_price": amer, "mc_price": mc["price"],
+        "delta": bs.delta, "gamma": bs.gamma, "theta": bs.theta,
+        "vega": bs.vega, "rho": bs.rho,
+        "projected_st": projected_ST,
+        "futures_fair_value": fut.fair_value, "futures_basis": fut.basis,
+        "futures_carry": fut.annualized_carry,
+    }
+    if rows:
+        _opt_summary.update({
+            "best_strike": float(best["Strike"]),
+            "best_premium": float(best["Premium"]),
+            "best_edge": float(best["Edge ($)"]),
+            "best_verdict": str(best["Verdict"]),
+        })
+    st.session_state["rep_options"] = _opt_summary
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 11 — REPORT
@@ -1046,18 +1073,41 @@ with tabs[9]:
 with tabs[10]:
     st.markdown('<div class="section-header">📄 One-Click Equity Research Report</div>', unsafe_allow_html=True)
     st.caption(
-        "Generate a formatted PDF summary: ticker breakdown, valuation range, signal, "
-        "SHAP feature impacts, DCF and peer multiples."
+        "Generate a formatted PDF covering every tab: valuation range and signal, "
+        "fundamentals, SHAP impacts, DCF, peers, backtest, regime and technical timing, "
+        "guardrails, insider flow, position sizing, screener, filing divergence and the "
+        "options / futures desk."
     )
 
-    include_dcf = st.checkbox("Include DCF section", value=True)
-    include_peers = st.checkbox("Include peer benchmarking", value=True)
+    SECTIONS = [
+        "Fundamentals & model features", "SHAP feature impacts", "DCF",
+        "Peer benchmarking", "Backtest", "Execution & timing",
+        "Position sizing", "Guardrails & insider flow", "Screener",
+        "Filing divergence", "Options & futures", "Macro backdrop",
+    ]
+    chosen = st.multiselect(
+        "Sections to include", SECTIONS, default=SECTIONS,
+        help="Everything is included by default. Deselect anything you want left out.",
+    )
+    want = set(chosen)
+
+    # Sections sourced from other tabs are only available once those tabs have
+    # been computed — flag the gaps rather than silently dropping them.
+    pending = []
+    if "Screener" in want and st.session_state.get("rep_screener") is None:
+        pending.append("Screener (run a screen on the 🔬 Screener tab)")
+    if "Filing divergence" in want and st.session_state.get("rep_filings") is None:
+        pending.append("Filing divergence (run a comparison on the 📰 Filings Δ tab)")
+    if "Options & futures" in want and st.session_state.get("rep_options") is None:
+        pending.append("Options & futures (open the ⚡ Options & Futures tab once)")
+    if pending:
+        st.info("Not yet computed, so these will be skipped: " + "; ".join(pending))
 
     if st.button("🧾 Generate Report", type="primary"):
         with st.spinner("Building report..."):
             dcf_payload = None
-            if include_dcf:
-                _d = dcf_mod.run_dcf(dcf_mod.DCFInputs(
+            if "DCF" in want:
+                _d = st.session_state.get("rep_dcf") or dcf_mod.run_dcf(dcf_mod.DCFInputs(
                     fcf0=float(raw.get("free_cash_flow") or raw.get("op_cash_flow") or 1e9),
                     shares=float(raw.get("shares") or 1e9),
                     net_debt=float(raw.get("long_term_debt") or 0.0),
@@ -1065,7 +1115,7 @@ with tabs[10]:
                 dcf_payload = {"intrinsic_per_share": _d.intrinsic_per_share}
 
             peers_payload = None
-            if include_peers:
+            if "Peer benchmarking" in want:
                 peers_payload = peers_mod.benchmark(
                     tk, sector=raw.get("sector"),
                     self_metrics={"name": raw.get("name", tk), "pe": feats.get("pe_ratio"),
@@ -1074,6 +1124,21 @@ with tabs[10]:
                                   "market_cap": raw.get("market_cap"), "source": "SEC"},
                 )
 
+            backtest_payload = None
+            if "Backtest" in want:
+                backtest_payload = (
+                    st.session_state.get("rep_backtest")
+                    or (bt_mod.run_backtest(md.history) if not md.history.empty else None)
+                )
+
+            quality_payload = None
+            if "Guardrails & insider flow" in want:
+                quality_payload = st.session_state.get("rep_quality")
+                if quality_payload is None and raw.get("cik"):
+                    quality_payload = quality_mod.compute_quality(
+                        sec_mod.get_financials(raw["cik"]), raw.get("market_cap")
+                    )
+
             pdf_bytes = reports.build_report(
                 ticker=tk,
                 company=raw.get("name", tk),
@@ -1081,11 +1146,27 @@ with tabs[10]:
                 valuation={"point": result.point, "low": result.low,
                            "median": result.median, "high": result.high},
                 signal_text=signal_text,
-                attribution=attribution.as_frame(),
+                attribution=attribution.as_frame() if "SHAP feature impacts" in want else None,
                 dcf=dcf_payload,
                 peers=peers_payload,
-                macro={"cpi": macro_now.cpi, "fed_funds": macro_now.fed_funds,
-                       "yield_curve": macro_now.yield_curve_10y_2y},
+                macro=({"cpi": macro_now.cpi, "fed_funds": macro_now.fed_funds,
+                        "yield_curve": macro_now.yield_curve_10y_2y}
+                       if "Macro backdrop" in want else None),
+                features=feats if "Fundamentals & model features" in want else None,
+                fundamentals=raw if "Fundamentals & model features" in want else None,
+                backtest=backtest_payload,
+                regime=regime if "Execution & timing" in want else None,
+                technical=technical if "Execution & timing" in want else None,
+                sizing=sizing if "Position sizing" in want else None,
+                quality=quality_payload,
+                insider=(st.session_state.get("rep_insider")
+                         if "Guardrails & insider flow" in want else None),
+                filings=(st.session_state.get("rep_filings")
+                         if "Filing divergence" in want else None),
+                screener=(st.session_state.get("rep_screener")
+                          if "Screener" in want else None),
+                options=(st.session_state.get("rep_options")
+                         if "Options & futures" in want else None),
             )
 
         ext = "pdf" if reports.has_reportlab() else "txt"
