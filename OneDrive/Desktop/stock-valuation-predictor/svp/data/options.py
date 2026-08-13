@@ -46,8 +46,14 @@ def _deriv():
 # Columns the UI and the report expect, in display order.
 CHAIN_COLUMNS = [
     "strike", "lastPrice", "bid", "ask", "volume",
-    "openInterest", "impliedVolatility", "inTheMoney",
+    "openInterest", "impliedVolatility", "inTheMoney", "ivRepaired",
 ]
+
+# Plausible bounds for an equity implied vol. Yahoo returns a placeholder near
+# zero (~1e-5) for many contracts — especially near-dated ones — and that value
+# is truthy, so it silently poisons any downstream sigma. Anything outside this
+# band is treated as missing and re-solved from the quoted premium.
+IV_MIN, IV_MAX = 0.01, 5.0
 
 # Short-lived in-process cache. Streamlit reruns the whole script on every
 # widget interaction (expiry dropdown, vol slider, strike input), so without
@@ -97,8 +103,57 @@ def _normalize(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     out["volume"] = out["volume"].fillna(0)
     out["openInterest"] = out["openInterest"].fillna(0)
 
+    out["ivRepaired"] = False
     out = out.dropna(subset=["strike"]).sort_values("strike").reset_index(drop=True)
     return out[CHAIN_COLUMNS]
+
+
+def _mid_price(row) -> Optional[float]:
+    """Mid of the quoted spread, falling back to the last traded price."""
+    bid, ask = row.get("bid"), row.get("ask")
+    if bid and ask and bid > 0 and ask > 0:
+        return float((bid + ask) / 2)
+    last = row.get("lastPrice")
+    if last and last > 0:
+        return float(last)
+    return None
+
+
+def repair_iv(df: pd.DataFrame, spot: float, T: float, kind: str,
+              r: float = 0.045) -> pd.DataFrame:
+    """
+    Replace implausible quoted implied vols by re-solving from the premium.
+
+    Yahoo frequently reports ~1e-5 rather than a real IV. Left alone that value
+    flows into the pricer as sigma and produces a near-zero-vol world: bogus
+    probabilities of finishing in the money and a meaningless edge ranking.
+    Rows that cannot be re-solved (premium at or below intrinsic) are left as
+    NaN so callers can skip them rather than trust a placeholder.
+    """
+    if df.empty or T <= 0 or spot <= 0:
+        return df
+
+    deriv = _deriv()
+    out = df.copy()
+    iv = out["impliedVolatility"]
+    bad = iv.isna() | (iv < IV_MIN) | (iv > IV_MAX)
+    if not bad.any():
+        return out
+
+    for idx in out.index[bad]:
+        row = out.loc[idx]
+        premium = _mid_price(row)
+        solved = None
+        if premium:
+            solved = deriv.implied_volatility(
+                premium, spot, float(row["strike"]), T, r, kind=kind
+            )
+        if solved is not None and IV_MIN <= solved <= IV_MAX:
+            out.at[idx, "impliedVolatility"] = float(solved)
+            out.at[idx, "ivRepaired"] = True
+        else:
+            out.at[idx, "impliedVolatility"] = np.nan
+    return out
 
 
 def _spot_from_chain(chain, tk, fallback: float) -> float:
@@ -181,6 +236,7 @@ def _synthetic_chain(ticker: str, expiry: str, spot: float, r: float = 0.045,
                 "openInterest": oi, "volume": int(oi * rng.uniform(0.05, 0.4)),
                 "impliedVolatility": round(iv, 4),
                 "inTheMoney": (k < spot) if kind == "call" else (k > spot),
+                "ivRepaired": False,
             })
         return pd.DataFrame(rows)[CHAIN_COLUMNS]
 
@@ -229,6 +285,9 @@ def get_option_chain(
                     reason = f"empty chain returned for {ticker} {exp}"
                 else:
                     spot = _spot_from_chain(chain, tk, spot_fallback)
+                    T = max((pd.Timestamp(exp) - pd.Timestamp.today().normalize()).days, 0) / 365.0
+                    calls = repair_iv(calls, spot, T, "call")
+                    puts = repair_iv(puts, spot, T, "put")
                     live = OptionChain(ticker, exp, spot, calls, puts, source="yfinance")
                     _CACHE[key] = (now, live)
                     return live

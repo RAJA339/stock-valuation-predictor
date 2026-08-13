@@ -823,9 +823,20 @@ with tabs[9]:
     )
 
     expiries = options_mod.list_expiries(tk)
+
+    # Default to the first expiry at least ~30 days out. Liquid names list
+    # weeklies, so the nearest few are 1-7 DTE — near-worthless for a
+    # valuation-driven LEAP scan and the worst-quality IV data on the chain.
+    _today = pd.Timestamp.today().normalize()
+    _default_idx = next(
+        (i for i, e in enumerate(expiries)
+         if (pd.Timestamp(e) - _today).days >= 30),
+        min(2, len(expiries) - 1),
+    )
+
     ec1, ec2 = st.columns([1, 2])
     with ec1:
-        expiry = st.selectbox("Expiry", expiries, index=min(2, len(expiries) - 1), key="opt_expiry")
+        expiry = st.selectbox("Expiry", expiries, index=_default_idx, key="opt_expiry")
         if st.button("🔄 Refresh chain", key="opt_refresh"):
             options_mod.clear_cache()
         rf_rate = st.number_input(
@@ -876,13 +887,24 @@ with tabs[9]:
         st.markdown("**Puts**")
         st.dataframe(_show(chain.puts), width="stretch", height=280)
 
+    _repaired = int(chain.calls["ivRepaired"].sum() + chain.puts["ivRepaired"].sum())
+    if _repaired:
+        st.caption(
+            f"ℹ️ {_repaired} contract(s) came back from the feed with an implausible "
+            f"implied volatility (Yahoo often reports ~0 on near-dated strikes); their IV "
+            f"was re-solved from the quoted premium. Contracts that could not be re-solved "
+            f"show a blank IV and fall back to the slider volatility below."
+        )
+
     # ── Volatility smile ─────────────────────────────────────────────────────
-    if "impliedVolatility" in chain.calls.columns and not chain.calls.empty:
+    _smile_c = chain.calls.dropna(subset=["impliedVolatility"]) if not chain.calls.empty else chain.calls
+    _smile_p = chain.puts.dropna(subset=["impliedVolatility"]) if not chain.puts.empty else chain.puts
+    if not _smile_c.empty:
         fig, ax = plt.subplots(figsize=(7, 2.6))
-        ax.plot(chain.calls["strike"], chain.calls["impliedVolatility"] * 100,
+        ax.plot(_smile_c["strike"], _smile_c["impliedVolatility"] * 100,
                 marker="o", ms=3, lw=1.2, label="Calls")
-        if "impliedVolatility" in chain.puts.columns and not chain.puts.empty:
-            ax.plot(chain.puts["strike"], chain.puts["impliedVolatility"] * 100,
+        if not _smile_p.empty:
+            ax.plot(_smile_p["strike"], _smile_p["impliedVolatility"] * 100,
                     marker="o", ms=3, lw=1.2, label="Puts")
         ax.axvline(spot, color="#888", ls="--", lw=1, label="Spot")
         ax.set_xlabel("Strike")
@@ -988,7 +1010,10 @@ with tabs[9]:
             if mkt <= 0:
                 continue
             k = float(r_["strike"])
-            iv_row = float(r_.get("impliedVolatility") or vol_in) or vol_in
+            # Quoted IV may be NaN — either absent, or rejected and unsolvable
+            # by the chain loader. Never let that reach the pricer as sigma.
+            _iv = r_.get("impliedVolatility")
+            iv_row = float(_iv) if (_iv is not None and pd.notna(_iv) and _iv > 0) else vol_in
             e = deriv_mod.bridge_call_edge(
                 projected_ST=projected_ST, strike=k, T=T_exp, r=rf_rate,
                 market_price=mkt, sigma=iv_row, spot=spot, kind=side,
