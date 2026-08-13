@@ -50,18 +50,28 @@ _LIVE_COLUMNS = [
 ]
 
 
-def _live_frame(kind: str, ivs=(0.31, 0.32, 0.33)) -> pd.DataFrame:
-    """A frame shaped like yfinance's, deliberately unsorted with NaN volume."""
+def _live_frame(kind: str, ivs=(0.31, 0.32, 0.33), spot=222.75, T=0.35) -> pd.DataFrame:
+    """
+    A frame shaped like yfinance's — unsorted strikes, NaN volume on an
+    illiquid row, and the extra columns real payloads carry.
+
+    Premiums are Black-Scholes values at the stated IVs, because a real chain's
+    price and vol are consistent by construction. Inventing them independently
+    would make every row look like a feed error to the repricing check.
+    """
+    from svp.models import derivatives as _DV
+
     strikes = [230.0, 210.0, 220.0]           # out of order on purpose
     rows = []
     for i, k in enumerate(strikes):
+        price = _DV.black_scholes(spot, k, T, 0.045, ivs[i], kind=kind).price
         rows.append({
             "contractSymbol": f"AAPL26{kind[0].upper()}{int(k)}",
             "lastTradeDate": pd.Timestamp("2026-08-12"),
             "strike": k,
-            "lastPrice": 5.0 + i,
-            "bid": 4.9 + i,
-            "ask": 5.1 + i,
+            "lastPrice": round(price, 2),
+            "bid": round(max(price - 0.05, 0.01), 2),
+            "ask": round(price + 0.05, 2),
             "change": 0.1,
             "percentChange": 2.0,
             "volume": np.nan if i == 0 else 120 + i,   # illiquid strike
@@ -225,6 +235,27 @@ cheap[["bid", "ask", "lastPrice"]] = 0.0          # no premium to solve from
 cheap_out = OPT.repair_iv(cheap.pipe(OPT._normalize), _ATM_SPOT, _ATM_T, "call")
 check("unsolvable rows become NaN", cheap_out["impliedVolatility"].isna().all())
 check("unsolvable rows are not flagged repaired", not cheap_out["ivRepaired"].any())
+
+# Yahoo's dyadic placeholders sit *inside* any sane band, so only the
+# repricing test catches them. These are the exact values observed live:
+# 0.015625 (2^-6) on NVDA/KO/SOFI and 0.0625 (2^-4) on F.
+for _label, _spot, _k, _prem, _placeholder, _expected in (
+    ("NVDA", 224.09, 225.00, 2.02, 0.015625, 0.52),
+    ("KO", 86.71, 87.00, 0.35, 0.015625, 0.263),
+    ("F", 13.83, 14.00, 0.06, 0.0625, 0.436),
+):
+    _df = pd.DataFrame([{
+        "strike": _k, "lastPrice": _prem, "bid": _prem - 0.01, "ask": _prem + 0.01,
+        "volume": 10, "openInterest": 10, "impliedVolatility": _placeholder,
+        "inTheMoney": False,
+    }])
+    _fixed = OPT.repair_iv(OPT._normalize(_df), _spot, 1 / 365, "call")
+    _got = float(_fixed["impliedVolatility"].iloc[0])
+    check(f"{_label} in-band placeholder {_placeholder:.6g} is rejected",
+          abs(_got - _placeholder) > 0.01)
+    check(f"{_label} re-solves to the premium-implied vol",
+          abs(_got - _expected) < 0.01)
+    check(f"{_label} repair is flagged", bool(_fixed["ivRepaired"].iloc[0]))
 
 # Good IVs must be left completely alone.
 good = _live_frame("call", ivs=(0.31, 0.32, 0.33)).pipe(OPT._normalize)

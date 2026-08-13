@@ -78,15 +78,38 @@ def check_ticker(ticker: str) -> bool:
     print(f"IV repaired       : {repaired} contract(s)")
     print(f"IV unusable       : {blank_iv} contract(s)")
 
-    # Every IV that survives must be plausible — that is the property the app
-    # depends on. A repaired IV is a healthy outcome, not a failure: Yahoo
-    # reports ~0 on many near-dated strikes, and the loader re-solves those
-    # from the quoted premium.
+    # Every IV that survives must be plausible AND self-consistent: repricing
+    # the contract at its own IV must reproduce its own premium. A bounds check
+    # alone misses Yahoo's dyadic placeholders (2^-6, 2^-4), which look sane
+    # but are off by tens of vol points. A repaired IV is a healthy outcome.
+    T = max((pd.Timestamp(chain.expiry) - pd.Timestamp.today().normalize()).days, 1) / 365.0
+    worst = (0.0, None)
+    inconsistent = 0
     for side, df in (("calls", chain.calls), ("puts", chain.puts)):
         iv = df["impliedVolatility"].dropna()
         if not iv.empty and ((iv < OPT.IV_MIN) | (iv > OPT.IV_MAX)).any():
-            print(f"!! {side} still carry implausible IVs after repair")
+            print(f"!! {side} still carry out-of-band IVs after repair")
             ok = False
+
+        for _, row in df.iterrows():
+            v, premium = row["impliedVolatility"], OPT._mid_price(row)
+            if pd.isna(v) or not premium:
+                continue
+            modelled = DV.black_scholes(chain.spot, float(row["strike"]), T, 0.045,
+                                        float(v), kind=side[:-1]).price
+            err = abs(modelled - premium)
+            if err > max(OPT.IV_REPRICE_TOL_FRAC * premium, OPT.IV_REPRICE_TOL_ABS):
+                inconsistent += 1
+                if err > worst[0]:
+                    worst = (err, f"{side} K={row['strike']:.2f} "
+                                  f"premium ${premium:.2f} vs model ${modelled:.2f} "
+                                  f"at IV {v * 100:.1f}%")
+
+    print(f"IV inconsistent   : {inconsistent} contract(s)")
+    if inconsistent:
+        print(f"   worst: {worst[1]}")
+        print("!! some IVs do not reprice to their own premium")
+        ok = False
 
     # Cross-check the near-ATM call: its premium should re-solve to its IV.
     atm = chain.calls.iloc[(chain.calls["strike"] - chain.spot).abs().argsort()[:1]]
