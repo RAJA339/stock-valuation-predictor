@@ -795,16 +795,40 @@ with tabs[4]:
 
     summ = peers_mod.peer_summary(pdf)
     st.markdown('<div class="section-header">Relative Positioning vs Peer Median</div>', unsafe_allow_html=True)
+    # The pill is coloured strictly by the sign of the difference: above peers
+    # is green, below peers is red. For valuation multiples and leverage that
+    # is the opposite of "good for the buyer" — a P/E far above peers means an
+    # expensive stock — so the reading is spelled out underneath rather than
+    # being carried by colour alone.
+    LOWER_IS_CHEAPER = ("EV/EBITDA", "P/E", "P/S")
+    LOWER_IS_SAFER = ("Debt/Equity",)
+
+    def _peer_note(metric: str, pct: float) -> str:
+        above = pct >= 0
+        if metric in LOWER_IS_CHEAPER:
+            return ("Richer than peers — paying more per unit of earnings"
+                    if above else "Cheaper than peers on this multiple")
+        if metric in LOWER_IS_SAFER:
+            return ("More levered than peers" if above else "Less levered than peers")
+        return ("Above the peer median" if above else "Below the peer median")
+
     metric_cols = st.columns(len(summ) or 1)
     for i, (metric, d) in enumerate(summ.items()):
         with metric_cols[i]:
             if d["subject"] is None or d["premium_pct"] is None:
-                st.metric(metric, "N/A")
+                st.markdown(metric_card(metric, "N/A"), unsafe_allow_html=True)
             else:
-                st.metric(
-                    metric, f"{d['subject']:.2f}",
-                    delta=f"{d['premium_pct']:+.0f}% vs peers",
-                    delta_color="inverse" if metric in ("EV/EBITDA", "P/E", "Debt/Equity", "P/S") else "normal",
+                pct = d["premium_pct"]
+                cls = "delta-pos" if pct >= 0 else "delta-neg"
+                arrow = "↑" if pct >= 0 else "↓"
+                st.markdown(
+                    f'<div class="metric-card">'
+                    f'<div class="metric-label">{metric}</div>'
+                    f'<div class="metric-value">{d["subject"]:.2f}</div>'
+                    f'<span class="{cls}">{arrow} {pct:+.0f}% vs peers</span>'
+                    f'<div class="metric-note">{_peer_note(metric, pct)}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
                 )
 
     # Peer bar chart for EV/EBITDA & P/E.

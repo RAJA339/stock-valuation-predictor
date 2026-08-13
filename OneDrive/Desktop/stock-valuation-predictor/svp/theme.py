@@ -118,6 +118,22 @@ CSS = f"""
     .signal-over  {{ color: {BEAR}; font-size: 1.35rem; font-weight: 700; }}
     .signal-hold  {{ color: {AMBER}; font-size: 1.35rem; font-weight: 700; }}
 
+    /* ── Delta pills — coloured strictly by sign ────────────────────────── */
+    .delta-pos {{
+        display: inline-block; padding: 3px 10px; border-radius: 999px;
+        background: {BULL_DIM}; color: {BULL};
+        font-size: .78rem; font-weight: 700; margin-top: 6px;
+    }}
+    .delta-neg {{
+        display: inline-block; padding: 3px 10px; border-radius: 999px;
+        background: {BEAR_DIM}; color: {BEAR};
+        font-size: .78rem; font-weight: 700; margin-top: 6px;
+    }}
+    .metric-note {{
+        font-size: .68rem; color: {MUTED}; margin-top: 7px;
+        letter-spacing: .02em; line-height: 1.35;
+    }}
+
     /* ── Section headers ────────────────────────────────────────────────── */
     .section-header {{
         font-size: .95rem; font-weight: 700; color: {TEXT};
