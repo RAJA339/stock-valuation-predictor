@@ -19,9 +19,12 @@ warnings.filterwarnings("ignore")
 import numpy as np
 
 from svp import features as F
-from svp.models import valuation as V, explain as X, dcf as D, backtest as B
-from svp.analytics import peers as P
-from svp.data import storage, sentiment, market
+from svp.models import (
+    valuation as V, explain as X, dcf as D, backtest as B,
+    regime as RG, sizing as SZ, derivatives as DV,
+)
+from svp.analytics import peers as P, technical as TA
+from svp.data import storage, sentiment, market, filings_nlp as NLP, options as OPT
 from svp import reports
 
 failures = []
@@ -96,6 +99,65 @@ report = reports.build_report(
     {"cpi": 314.0, "fed_funds": 4.3, "yield_curve": -0.1},
 )
 check("report produced non-trivial bytes", isinstance(report, (bytes, bytearray)) and len(report) > 500)
+
+# ── Regime classifier ─────────────────────────────────────────────────────────
+calm = RG.classify(vix_level=12.0, yield_curve=1.2)
+crisis = RG.classify(vix_level=48.0, yield_curve=-1.0)
+check("regime labels are known", {calm.regime, crisis.regime} <= {"Calm", "Neutral", "Stress", "Crisis"})
+check("stressed regime scales signals down", crisis.signal_scaler <= calm.signal_scaler)
+
+# ── Technical filters ─────────────────────────────────────────────────────────
+tech = TA.analyze(md.history)
+check("technical signals computed", tech is not None and tech.sma200 is not None)
+check("ATR is positive", tech is not None and tech.atr is not None and tech.atr > 0)
+
+# ── Position sizing ───────────────────────────────────────────────────────────
+ann_vol = SZ.annualized_vol(md.history["Close"])
+szr = SZ.compute_sizing(190.0, res.mc_samples, res.low, res.high, tech.atr if tech else None, ann_vol)
+check("kelly fraction bounded to [0,1]", 0.0 <= szr.kelly_fraction <= 1.0)
+check("stop-loss sits below entry", szr.stop_loss is None or szr.stop_loss < 190.0)
+
+# ── Filings NLP ───────────────────────────────────────────────────────────────
+fdv = NLP.compare_texts(NLP.SAMPLE_LATEST, NLP.SAMPLE_PRIOR)
+check("filing similarity in [0,1]", 0.0 <= fdv.similarity <= 1.0)
+
+# ── Derivatives: Black-Scholes, parity, Greeks ────────────────────────────────
+_S, _K, _T, _r, _sig, _q = 100.0, 95.0, 0.75, 0.045, 0.30, 0.01
+bs_c = DV.black_scholes(_S, _K, _T, _r, _sig, _q, "call")
+bs_p = DV.black_scholes(_S, _K, _T, _r, _sig, _q, "put")
+parity_lhs = bs_c.price - bs_p.price
+parity_rhs = _S * np.exp(-_q * _T) - _K * np.exp(-_r * _T)
+check("put-call parity holds", abs(parity_lhs - parity_rhs) < 1e-6)
+check("call delta in (0,1)", 0.0 < bs_c.delta < 1.0)
+check("put delta in (-1,0)", -1.0 < bs_p.delta < 0.0)
+check("gamma and vega positive", bs_c.gamma > 0 and bs_c.vega > 0)
+
+# ── Derivatives: binomial, Monte-Carlo, implied vol ──────────────────────────
+bino_eu = DV.binomial_price(_S, _K, _T, _r, _sig, _q, "call", steps=400, american=False)
+check("binomial European converges to Black-Scholes", abs(bino_eu - bs_c.price) < 0.05)
+amer_put = DV.binomial_price(_S, _K, _T, _r, _sig, _q, "put", steps=400, american=True)
+check("American put >= European put", amer_put >= bs_p.price - 1e-9)
+mc_opt = DV.monte_carlo_price(_S, _K, _T, _r, _sig, _q, "call", n=50000)
+check("Monte-Carlo option price within 4 standard errors",
+      abs(mc_opt["price"] - bs_c.price) < 4 * mc_opt["stderr"] + 0.02)
+iv_back = DV.implied_volatility(bs_c.price, _S, _K, _T, _r, _q, "call")
+check("implied vol round-trips", iv_back is not None and abs(iv_back - _sig) < 1e-3)
+
+# ── Derivatives: futures cost-of-carry + valuation bridge ────────────────────
+fut = DV.futures_fair_value(100.0, 0.045, 1.0, storage_cost=0.01, convenience_yield=0.02)
+check("futures carry = r + s - c", abs(fut.annualized_carry - (0.045 + 0.01 - 0.02)) < 1e-12)
+check("positive carry puts futures above spot", fut.fair_value > 100.0)
+edge = DV.bridge_call_edge(projected_ST=399.43, strike=300.0, T=1.0, r=0.045,
+                           market_price=45.0, sigma=0.30, spot=280.0)
+check("bridge edge is finite", np.isfinite(edge.edge))
+check("bridge P(ITM) in [0,1]", 0.0 <= edge.prob_itm <= 1.0)
+
+# ── Option chain pipeline (synthetic fallback offline) ───────────────────────
+chain = OPT.get_option_chain("AAPL", spot_fallback=190.0)
+check("option chain has calls and puts", not chain.calls.empty and not chain.puts.empty)
+check("chain exposes strike/IV columns",
+      {"strike", "impliedVolatility"} <= set(chain.calls.columns))
+check("expiry list non-empty", len(OPT.list_expiries("AAPL")) > 0)
 
 # ── Result ────────────────────────────────────────────────────────────────────
 print()

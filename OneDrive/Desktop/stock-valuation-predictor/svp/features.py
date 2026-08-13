@@ -184,8 +184,9 @@ def build_features(
         "market_price": price,
     }
 
-    # Raw fundamentals kept alongside for DCF / peer / report modules.
+    # Raw fundamentals kept alongside for DCF / peer / report / guardrail modules.
     features["_raw"] = {
+        "cik": cik,
         "revenue": revenue,
         "net_income": net_income,
         "total_assets": total_assets,
