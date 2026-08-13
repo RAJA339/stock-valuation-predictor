@@ -179,6 +179,20 @@ def benchmark(
             for r in rows
         ]
     )
+
+    # Every metric here is Optional[float], so a column in which *no* row had a
+    # value comes back as dtype ``object`` holding Python ``None`` rather than
+    # float64 holding NaN. That distinction matters downstream: NaN is skipped
+    # silently by matplotlib and by ``.median(skipna=True)``, while ``None``
+    # raises (``0 + None``) inside the bar renderer. A company with no EBITDA —
+    # a bank, a REIT, a loss-maker — is ordinary, and so is a rate-limited feed
+    # that returns partial ``info``, so this is reachable in normal use.
+    # Coercing once here keeps the table, the summary, the chart and the PDF
+    # all working off genuinely numeric columns.
+    for col in ("EV/EBITDA", "P/E", "Debt/Equity", "P/S",
+                "Profit Margin", "Market Cap ($B)"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
     return df
 
 

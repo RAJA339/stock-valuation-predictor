@@ -832,16 +832,22 @@ with tabs[4]:
                     unsafe_allow_html=True,
                 )
 
-    # Peer bar chart for EV/EBITDA & P/E.
-    fig, ax = plt.subplots(figsize=(9, 3.2))
-    theme.style_axes(fig, ax)
-    plot_df = pdf.dropna(subset=["P/E"]).head(8)
-    x = np.arange(len(plot_df))
-    ax.bar(x - 0.2, plot_df["P/E"], width=0.4, color=theme.TEAL, label="P/E")
-    ax.bar(x + 0.2, plot_df["EV/EBITDA"], width=0.4, color=theme.GREEN, label="EV/EBITDA")
-    ax.set_xticks(x); ax.set_xticklabels(plot_df["Ticker"], fontsize=8)
-    ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
-    st.pyplot(fig, width="stretch"); plt.close(fig)
+    # Peer bar chart for EV/EBITDA & P/E. Keep a peer that has one of the two
+    # multiples but not the other — dropping on P/E alone silently hid every
+    # company whose earnings are negative, which is exactly the case a reader
+    # wants to see in the comparison.
+    plot_df = pdf.dropna(subset=["P/E", "EV/EBITDA"], how="all").head(8)
+    if plot_df.empty:
+        st.info("No peer reported a usable P/E or EV/EBITDA, so there is nothing to chart.")
+    else:
+        fig, ax = plt.subplots(figsize=(9, 3.2))
+        theme.style_axes(fig, ax)
+        x = np.arange(len(plot_df))
+        ax.bar(x - 0.2, plot_df["P/E"], width=0.4, color=theme.TEAL, label="P/E")
+        ax.bar(x + 0.2, plot_df["EV/EBITDA"], width=0.4, color=theme.GREEN, label="EV/EBITDA")
+        ax.set_xticks(x); ax.set_xticklabels(plot_df["Ticker"], fontsize=8)
+        ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
+        st.pyplot(fig, width="stretch"); plt.close(fig)
     st.caption(f"Peers auto-selected for **{tk}** (sector: {raw.get('sector') or 'n/a'}). "
                "Multiples marked *estimated* when live data was unavailable.")
 
