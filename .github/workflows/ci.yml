@@ -57,5 +57,15 @@ jobs:
           HTTP_PROXY: ""
         run: python ci/smoke_test.py
 
+      - name: Option-chain live code path (stubbed yfinance)
+        env:
+          # Runners have no reliable route to Yahoo, so the live branch is
+          # driven against stubbed responses shaped like the real API rather
+          # than hitting the network. ci/options_live_check.py covers the real
+          # endpoint and is run manually.
+          HTTPS_PROXY: ""
+          HTTP_PROXY: ""
+        run: python ci/options_live_path_test.py
+
       - name: Streamlit AppTest (renders all tabs, asserts no exceptions)
         run: python ci/apptest_check.py
