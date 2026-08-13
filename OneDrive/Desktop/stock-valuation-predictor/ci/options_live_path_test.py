@@ -50,7 +50,7 @@ _LIVE_COLUMNS = [
 ]
 
 
-def _live_frame(kind: str) -> pd.DataFrame:
+def _live_frame(kind: str, ivs=(0.31, 0.32, 0.33)) -> pd.DataFrame:
     """A frame shaped like yfinance's, deliberately unsorted with NaN volume."""
     strikes = [230.0, 210.0, 220.0]           # out of order on purpose
     rows = []
@@ -66,7 +66,7 @@ def _live_frame(kind: str) -> pd.DataFrame:
             "percentChange": 2.0,
             "volume": np.nan if i == 0 else 120 + i,   # illiquid strike
             "openInterest": 900 + i,
-            "impliedVolatility": 0.31 + 0.01 * i,
+            "impliedVolatility": ivs[i],
             "inTheMoney": k < 220.0,
             "contractSize": "REGULAR",
             "currency": "USD",
@@ -195,6 +195,48 @@ install(payload="none_frames")
 chain = OPT.get_option_chain("AAPL", spot_fallback=190.0)
 check("None frames never reach the caller as None",
       isinstance(chain.calls, pd.DataFrame) and isinstance(chain.puts, pd.DataFrame))
+
+# ── Implausible quoted IV is repaired, not trusted ───────────────────────────
+# Observed live on AAPL: Yahoo reported IV of 0.4% on a 1-DTE ATM call whose
+# $2.20 premium implies ~36%. That value is truthy, so unguarded it flows into
+# the pricer as sigma and yields a near-zero-vol world.
+_ATM_SPOT, _ATM_T = 302.25, 30 / 365.0
+_bs = __import__("svp.models.derivatives", fromlist=["x"])
+_premium = _bs.black_scholes(_ATM_SPOT, 220.0, _ATM_T, 0.045, 0.36, kind="call").price
+
+frame = _live_frame("call", ivs=(1e-5, 0.0, 12.0))   # placeholder, zero, absurd
+frame.loc[frame["strike"] == 220.0, ["bid", "ask"]] = [_premium - 0.05, _premium + 0.05]
+repaired = OPT.repair_iv(frame.pipe(OPT._normalize), _ATM_SPOT, _ATM_T, "call")
+
+_row = repaired.loc[repaired["strike"] == 220.0].iloc[0]
+check("placeholder IV is not passed through", _row["impliedVolatility"] != 1e-5)
+check("repaired IV recovers the true volatility",
+      abs(float(_row["impliedVolatility"]) - 0.36) < 0.02)
+check("repair is flagged on the row", bool(_row["ivRepaired"]))
+check("every implausible IV is either repaired or NaN",
+      not ((repaired["impliedVolatility"] > 0) &
+           (repaired["impliedVolatility"] < OPT.IV_MIN)).any())
+check("absurd IV rejected too",
+      not (repaired["impliedVolatility"] > OPT.IV_MAX).any())
+
+# Unsolvable rows must be NaN, never a placeholder the pricer would believe.
+cheap = _live_frame("call", ivs=(1e-5, 1e-5, 1e-5))
+cheap[["bid", "ask", "lastPrice"]] = 0.0          # no premium to solve from
+cheap_out = OPT.repair_iv(cheap.pipe(OPT._normalize), _ATM_SPOT, _ATM_T, "call")
+check("unsolvable rows become NaN", cheap_out["impliedVolatility"].isna().all())
+check("unsolvable rows are not flagged repaired", not cheap_out["ivRepaired"].any())
+
+# Good IVs must be left completely alone.
+good = _live_frame("call", ivs=(0.31, 0.32, 0.33)).pipe(OPT._normalize)
+good_out = OPT.repair_iv(good, _ATM_SPOT, _ATM_T, "call")
+check("plausible IVs pass through untouched",
+      good_out["impliedVolatility"].tolist() == good["impliedVolatility"].tolist())
+check("untouched rows are not flagged repaired", not good_out["ivRepaired"].any())
+
+# And the repair must be applied by get_option_chain itself, not just available.
+install()
+_chain = OPT.get_option_chain("AAPL", "2026-12-18", spot_fallback=100.0)
+check("live fetch exposes the ivRepaired column", "ivRepaired" in _chain.calls.columns)
 
 # ── yfinance missing entirely ────────────────────────────────────────────────
 OPT._HAS_YF = False

@@ -72,8 +72,23 @@ def check_ticker(ticker: str) -> bool:
             print("!! spot outside the strike range — check the spot source")
             ok = False
 
-    # Sanity-check live IV against a Black-Scholes round-trip on the near-ATM
-    # call: a quoted premium should re-solve to roughly the quoted IV.
+    repaired = int(chain.calls["ivRepaired"].sum() + chain.puts["ivRepaired"].sum())
+    blank_iv = int(chain.calls["impliedVolatility"].isna().sum()
+                   + chain.puts["impliedVolatility"].isna().sum())
+    print(f"IV repaired       : {repaired} contract(s)")
+    print(f"IV unusable       : {blank_iv} contract(s)")
+
+    # Every IV that survives must be plausible — that is the property the app
+    # depends on. A repaired IV is a healthy outcome, not a failure: Yahoo
+    # reports ~0 on many near-dated strikes, and the loader re-solves those
+    # from the quoted premium.
+    for side, df in (("calls", chain.calls), ("puts", chain.puts)):
+        iv = df["impliedVolatility"].dropna()
+        if not iv.empty and ((iv < OPT.IV_MIN) | (iv > OPT.IV_MAX)).any():
+            print(f"!! {side} still carry implausible IVs after repair")
+            ok = False
+
+    # Cross-check the near-ATM call: its premium should re-solve to its IV.
     atm = chain.calls.iloc[(chain.calls["strike"] - chain.spot).abs().argsort()[:1]]
     if not atm.empty:
         row = atm.iloc[0]
@@ -83,16 +98,19 @@ def check_ticker(ticker: str) -> bool:
         elif row["lastPrice"] > 0:
             mid = float(row["lastPrice"])
         T = max((pd.Timestamp(chain.expiry) - pd.Timestamp.today().normalize()).days, 1) / 365.0
-        print(f"ATM strike        : ${row['strike']:,.2f}  premium ${mid if mid else float('nan'):,.2f}  "
-              f"quoted IV {row['impliedVolatility'] * 100:,.1f}%")
-        if mid and mid > 0:
+        quoted = row["impliedVolatility"]
+        print(f"ATM strike        : ${row['strike']:,.2f}  premium "
+              f"${mid if mid else float('nan'):,.2f}  "
+              f"IV {'n/a' if pd.isna(quoted) else f'{quoted * 100:,.1f}%'}"
+              f"{' (repaired)' if row['ivRepaired'] else ''}")
+        if mid and mid > 0 and pd.notna(quoted):
             iv = DV.implied_volatility(mid, chain.spot, float(row["strike"]), T, 0.045)
             if iv is None:
-                print("   (premium at/below intrinsic — IV not solvable, not necessarily an error)")
+                print("   (premium at/below intrinsic — IV not solvable, not an error)")
             else:
                 print(f"solved IV         : {iv * 100:,.1f}%")
-                if abs(iv - float(row["impliedVolatility"])) > 0.20:
-                    print("!! solved IV differs from the quoted IV by >20 vol points")
+                if abs(iv - float(quoted)) > 0.20:
+                    print("!! IV in the chain disagrees with the premium by >20 vol points")
                     ok = False
 
     print(f"RESULT            : {'PASSED' if ok else 'FAILED'}")
