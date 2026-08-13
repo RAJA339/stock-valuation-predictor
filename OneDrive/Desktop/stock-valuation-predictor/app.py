@@ -655,7 +655,7 @@ with tabs[1]:
 with tabs[2]:
     st.markdown(
         f'<div class="section-header">🔍 Feature Attribution '
-        f'({"SHAP" if attribution.source=="shap" else "XGBoost contributions"})</div>',
+        f'({"SHAP" if attribution.source == "shap" else "XGBoost contributions"})</div>',
         unsafe_allow_html=True,
     )
     st.caption(
