@@ -242,6 +242,23 @@ full = reports.build_report(
 )
 check("full report is larger than the summary-only report", len(full) > len(report))
 
+# The overflow bug: bare strings handed to ReportLab are drawn on one line and
+# run past the cell edge. Every cell must be a wrapping flowable.
+from reportlab.platypus import Paragraph as _RLPara
+_probe = reports._table(
+    [["Signal", "Reading"],
+     ["Regime Note",
+      "Low volatility, positively sloped curve — value signals reliable, and this "
+      "sentence is deliberately far longer than the column is wide."]],
+    [1.6 * reports.inch, 4.1 * reports.inch])
+check("table cells are wrapping flowables, not raw strings",
+      all(isinstance(c, _RLPara) for row in _probe._cellvalues for c in row))
+_w, _h = _probe.wrap(5.7 * reports.inch, 500)
+check("a long cell grows the row instead of overflowing", _h > 30)
+check("table never exceeds the width it was given", _w <= 5.75 * reports.inch)
+check("numeric columns are detected", reports._numeric("$1,234.50") and reports._numeric("-12.3%"))
+check("text columns are not", not reports._numeric("Better than chance"))
+
 # Text fallback must carry the same sections as the PDF.
 _had_reportlab = reports._HAS_REPORTLAB
 reports._HAS_REPORTLAB = False
@@ -315,9 +332,12 @@ check("signal strip renders", charts.signal_strip(_iset)[:4] == b"\x89PNG")
 check("chart handles an empty frame", charts.render(pd.DataFrame(), "AAPL", "15m") == b"")
 
 # ── SEC coverage: the parser must not reject well-formed filings ─────────────
+
+
 def _facts(tax="us-gaap", concept="StockholdersEquity", form="10-K", unit="USD", val=6e10):
     return {"facts": {tax: {concept: {"units": {unit: [
         {"end": "2025-12-31", "val": val, "form": form, "filed": "2026-02-01"}]}}}}}
+
 
 # Foreign private issuers file 20-F / 40-F, not 10-K. Excluding those forms
 # shut every non-US-domiciled listing out of the app.

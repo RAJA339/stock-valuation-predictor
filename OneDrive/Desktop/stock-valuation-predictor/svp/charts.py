@@ -14,16 +14,18 @@ by candle direction, then RSI and MACD panels beneath.
 from __future__ import annotations
 
 import io
-from typing import Optional
 
 import matplotlib
-matplotlib.use("Agg")
-import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
 
-from . import theme
+# The backend must be selected before pyplot is imported, so these imports
+# deliberately sit below a statement (E402).
+matplotlib.use("Agg")
+import matplotlib.dates as mdates  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+
+from . import theme  # noqa: E402
 
 # One palette across the app: charts must not drift from the UI.
 UP = theme.BULL          # deep emerald (10%)
@@ -33,7 +35,7 @@ PANEL = theme.PANEL      # obsidian (60%)
 GRID = theme.GRID        # obsidian (60%)
 TEXT = theme.TEXT        # pearl (30%)
 MUTED = theme.MUTED      # pearl (30%)
-ACCENT = theme.PEARL_DIM # pearl — overlays stay in the 30% band
+ACCENT = theme.PEARL_DIM  # pearl — overlays stay in the 30% band
 AMBER = theme.CHAMPAGNE  # champagne (10%) — one highlight only
 
 

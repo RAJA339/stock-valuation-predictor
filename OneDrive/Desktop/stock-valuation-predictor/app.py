@@ -61,6 +61,7 @@ from svp.analytics import (
     screener as screener_mod, indicators as ind_mod, accuracy as acc_mod,
 )
 from svp.data import intraday as intraday_mod
+from svp import rag as rag_mod
 from svp import reports, charts
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -395,7 +396,7 @@ tabs = st.tabs([
     "📈 Charts", "📊 Valuation", "🔍 Explainability", "🧮 DCF & Scenario",
     "🏦 Peers", "📉 Backtesting",
     "🎯 Execution & Timing", "🛡️ Guardrails", "🔬 Screener", "📰 Filings Δ",
-    "⚡ Options & Futures",
+    "🔎 Filings RAG", "⚡ Options & Futures",
     "📄 Report",
 ])
 
@@ -654,7 +655,7 @@ with tabs[1]:
 with tabs[2]:
     st.markdown(
         f'<div class="section-header">🔍 Feature Attribution '
-        f'({"SHAP" if attribution.source=="shap" else "XGBoost contributions"})</div>',
+        f'({"SHAP" if attribution.source == "shap" else "XGBoost contributions"})</div>',
         unsafe_allow_html=True,
     )
     st.caption(
@@ -1119,7 +1120,130 @@ with tabs[9]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 10 — OPTIONS & FUTURES
 # ══════════════════════════════════════════════════════════════════════════════
+# TAB 11 — FILINGS RAG (retrieval-augmented Q&A over 10-K / 10-Q text)
+# ══════════════════════════════════════════════════════════════════════════════
 with tabs[10]:
+    st.markdown('<div class="section-header">🔎 Ask the Filings</div>', unsafe_allow_html=True)
+    st.caption(
+        "Retrieval-augmented Q&A over this company's SEC filings. Text is pulled from "
+        "EDGAR, split on Item boundaries, chunked and indexed in memory, so every answer "
+        "quotes the filing directly and cites the Item it came from."
+    )
+
+    rc1, rc2, rc3 = st.columns([1, 1, 1.3])
+    with rc1:
+        rag_form = st.selectbox("Filing type", ["10-K", "10-Q"], key="rag_form")
+    with rc2:
+        rag_section = st.selectbox(
+            "Restrict to section",
+            ["Auto", "Risk Factors", "MD&A", "Market Risk", "Business"], key="rag_section",
+            help="Auto routes the question to a section from its wording.",
+        )
+    with rc3:
+        rag_k = st.slider("Passages to return", 2, 10, 5, key="rag_k")
+
+    if st.button("📥 Load & index filings", type="primary", key="rag_load"):
+        with st.spinner(f"Fetching {rag_form} filings for {tk} from SEC EDGAR..."):
+            latest_f, prior_f = rag_mod.filings.latest_pair(tk, form=rag_form)
+        if latest_f is None or not latest_f.text:
+            st.error(
+                f"Could not retrieve {rag_form} text for **{tk}**. The company may not "
+                "file this form, or EDGAR may be rate-limiting — try again shortly."
+            )
+        else:
+            with st.spinner("Chunking and indexing..."):
+                st.session_state["rag_bundle"] = {
+                    "ticker": tk, "form": rag_form,
+                    "latest": latest_f, "prior": prior_f,
+                    "li": rag_mod.store.build_index(latest_f),
+                    "pi": rag_mod.store.build_index(prior_f) if prior_f else None,
+                }
+
+    bundle = st.session_state.get("rag_bundle")
+    if bundle and bundle.get("ticker") != tk:
+        st.info(f"Index loaded for **{bundle['ticker']}**, not {tk}. Reload to switch.")
+
+    if not bundle:
+        st.info("Load the filings to begin. Nothing is fetched until you ask.")
+    else:
+        li, pi = bundle["li"], bundle["pi"]
+        latest_f, prior_f = bundle["latest"], bundle["prior"]
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.markdown(metric_card("Latest filing", latest_f.label, sub=True), unsafe_allow_html=True)
+        m2.markdown(metric_card("Compared with",
+                                prior_f.label if prior_f else "— none —", sub=True),
+                    unsafe_allow_html=True)
+        m3.markdown(metric_card("Indexed passages", f"{len(li.chunks):,}"), unsafe_allow_html=True)
+        m4.markdown(metric_card("Retriever", li.backend.upper(), sub=True), unsafe_allow_html=True)
+
+        st.caption("Sections found: " + (", ".join(
+            f"{s.item} {s.label} ({s.words:,} words)" for s in latest_f.sections
+        ) or "none — the filing layout was not recognised."))
+
+        if not rag_mod.store.has_llm_key():
+            st.caption(
+                "ℹ️ No LLM key configured, so answers are **extractive**: bullets are "
+                "quoted verbatim from the filing rather than paraphrased. Set "
+                "`OPENAI_API_KEY` to add a synthesis layer on top of the same passages."
+            )
+
+        st.markdown("**Try one of these**")
+        qcols = st.columns(3)
+        for i, q in enumerate(rag_mod.engine.SUGGESTED_QUESTIONS[:6]):
+            if qcols[i % 3].button(q, key=f"rag_sug_{i}", width="stretch"):
+                st.session_state["rag_question"] = q
+
+        question = st.text_input(
+            "Question", value=st.session_state.get("rag_question", ""),
+            placeholder="What newly added risk factors appear in the latest 10-K?",
+            key="rag_q_input",
+        )
+
+        if question:
+            with st.spinner("Retrieving..."):
+                ans = rag_mod.engine.answer(
+                    question, li, pi, k=int(rag_k),
+                    section=None if rag_section == "Auto" else rag_section,
+                )
+            st.session_state["rep_rag"] = ans
+
+            badge = ("comparing latest vs prior filing" if ans.mode == "diff"
+                     else "searching the latest filing")
+            st.markdown(
+                f'<span class="pill pill-accent">{badge}</span>'
+                + (f'<span class="pill pill-accent">{ans.section}</span>' if ans.section else ""),
+                unsafe_allow_html=True,
+            )
+            st.write("")
+
+            if ans.synthesis:
+                st.markdown(ans.synthesis)
+                st.caption("Synthesis is generated from the quoted passages below only.")
+                st.divider()
+
+            if ans.empty:
+                st.warning(ans.note or "No matching passage found.")
+            else:
+                for b in ans.bullets:
+                    st.markdown(
+                        f'<div class="metric-card" style="margin-bottom:8px">'
+                        f'<div style="line-height:1.55">“{b.quote}”</div>'
+                        f'<div class="metric-note">— {b.citation} '
+                        f'· {"novelty" if ans.mode == "diff" else "relevance"} '
+                        f'{b.score:.2f}</div></div>',
+                        unsafe_allow_html=True,
+                    )
+                st.caption(
+                    "Quotes are verbatim from the filing. "
+                    + ("*Novelty* is 1 − similarity to the closest passage in the prior "
+                       "filing, so a high score means the language is genuinely new rather "
+                       "than reworded." if ans.mode == "diff" else
+                       "*Relevance* is cosine similarity to the question.")
+                )
+
+# ══════════════════════════════════════════════════════════════════════════════
+with tabs[11]:
     st.markdown('<div class="section-header">⚡ Live Option Chain</div>', unsafe_allow_html=True)
     st.caption(
         "Strikes, bid/ask, open interest and implied volatility pulled from "
@@ -1477,7 +1601,7 @@ with tabs[10]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 11 — REPORT
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[11]:
+with tabs[12]:
     st.markdown('<div class="section-header">📄 One-Click Equity Research Report</div>', unsafe_allow_html=True)
     st.caption(
         "Generate a formatted PDF covering every tab: valuation range and signal, "

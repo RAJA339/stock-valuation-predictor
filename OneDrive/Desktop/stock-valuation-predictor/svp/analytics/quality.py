@@ -78,10 +78,6 @@ def piotroski_f_score(facts) -> tuple[Optional[int], dict]:
     gp, gp_p = _hist2(facts, "GrossProfit")
     shares, shares_p = _hist2(facts, ["CommonStockSharesOutstanding", "CommonStockSharesIssued"])
 
-    avg_assets = None
-    if assets and assets_p:
-        avg_assets = (assets + assets_p) / 2
-
     def add(name, cond):
         if cond is None:
             detail[name] = None
@@ -92,11 +88,13 @@ def piotroski_f_score(facts) -> tuple[Optional[int], dict]:
     add("ROA positive", (ni / assets > 0) if (ni is not None and assets) else None)
     add("Operating cash flow positive", (ocf > 0) if ocf is not None else None)
     add("ROA improving",
-        ((ni / assets) > (ni_p / assets_p)) if (ni is not None and assets and ni_p is not None and assets_p) else None)
+        ((ni / assets) > (ni_p / assets_p))
+        if (ni is not None and assets and ni_p is not None and assets_p) else None)
     add("Accruals (CFO > NI)", (ocf > ni) if (ocf is not None and ni is not None) else None)
     # Leverage / liquidity
     add("Lower long-term debt ratio",
-        ((ltd / assets) < (ltd_p / assets_p)) if (ltd is not None and assets and ltd_p is not None and assets_p) else None)
+        ((ltd / assets) < (ltd_p / assets_p))
+        if (ltd is not None and assets and ltd_p is not None and assets_p) else None)
     add("Higher current ratio",
         ((ca / cl) > (ca_p / cl_p)) if (ca and cl and ca_p and cl_p) else None)
     add("No dilution (shares not up)",
@@ -153,7 +151,8 @@ def beneish_m_score(facts) -> tuple[Optional[float], str]:
     ca, ca_p = _hist2(facts, "AssetsCurrent")
     ppe, ppe_p = _hist2(facts, "PropertyPlantAndEquipmentNet")
     assets, assets_p = _hist2(facts, "Assets")
-    dep, dep_p = _hist2(facts, ["DepreciationDepletionAndAmortization", "DepreciationAmortizationAndAccretionNet"])
+    dep, dep_p = _hist2(facts, ["DepreciationDepletionAndAmortization",
+                                "DepreciationAmortizationAndAccretionNet"])
     sga, sga_p = _hist2(facts, "SellingGeneralAndAdministrativeExpense")
     ni, ni_p = _hist2(facts, "NetIncomeLoss")
     ocf, ocf_p = _hist2(facts, "NetCashProvidedByUsedInOperatingActivities")
@@ -184,7 +183,11 @@ def beneish_m_score(facts) -> tuple[Optional[float], str]:
     # Sales Growth Index
     sgi = safe(rev, rev_p)
     # Depreciation Index
-    depi = safe(safe(dep_p, (dep_p or 0) + (ppe_p or 0)), safe(dep, (dep or 0) + (ppe or 0))) if (dep and dep_p) else 1.0
+    depi = (
+        safe(safe(dep_p, (dep_p or 0) + (ppe_p or 0)),
+             safe(dep, (dep or 0) + (ppe or 0)))
+        if (dep and dep_p) else 1.0
+    )
     # SGA Index
     sgai = safe(safe(sga, rev), safe(sga_p, rev_p)) if (sga and sga_p) else 1.0
     # Leverage Index

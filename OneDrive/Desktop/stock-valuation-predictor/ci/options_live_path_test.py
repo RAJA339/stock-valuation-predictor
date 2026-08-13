@@ -270,6 +270,8 @@ _chain = OPT.get_option_chain("AAPL", "2026-12-18", spot_fallback=100.0)
 check("live fetch exposes the ivRepaired column", "ivRepaired" in _chain.calls.columns)
 
 # ── Rate limiting must trigger a back-off, not a retry storm ─────────────────
+
+
 class RateLimited(Exception):
     pass
 
