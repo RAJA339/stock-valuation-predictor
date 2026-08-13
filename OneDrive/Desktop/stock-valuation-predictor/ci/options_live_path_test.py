@@ -269,6 +269,59 @@ install()
 _chain = OPT.get_option_chain("AAPL", "2026-12-18", spot_fallback=100.0)
 check("live fetch exposes the ivRepaired column", "ivRepaired" in _chain.calls.columns)
 
+# ── Rate limiting must trigger a back-off, not a retry storm ─────────────────
+class RateLimited(Exception):
+    pass
+
+
+holder = install(payload="raise_options")
+OPT.yf = type("_M", (), {"Ticker": staticmethod(
+    lambda t: (_ for _ in ()).throw(RateLimited("Too Many Requests. Rate limited."))
+)})
+OPT.clear_cache()
+OPT.list_expiries("AAPL")
+check("a rate-limit error trips the circuit breaker", OPT.cooldown_remaining() > 0)
+check("rate limits get the long cooldown", OPT.cooldown_remaining() > 600)
+
+calls = {"n": 0}
+
+
+def _counting(t):
+    calls["n"] += 1
+    raise RateLimited("Too Many Requests. Rate limited.")
+
+
+OPT.yf = type("_M", (), {"Ticker": staticmethod(_counting)})
+for _ in range(10):                      # simulate ten Streamlit reruns
+    OPT.list_expiries("AAPL")
+    OPT.get_option_chain("AAPL", spot_fallback=100.0)
+check("no further network calls while backing off", calls["n"] == 0)
+
+_c = OPT.get_option_chain("AAPL", spot_fallback=100.0)
+check("chain still renders during cooldown", not _c.calls.empty)
+check("cooldown is explained in the reason", "backing off" in _c.reason)
+
+# The fallback expiry list must be cached too — leaving it uncached was what
+# re-fired the failing request on every rerun.
+OPT.clear_cache(reset_cooldown=False)
+OPT.list_expiries("AAPL")
+_before = calls["n"]
+OPT.list_expiries("AAPL")
+check("fallback expiries are cached", calls["n"] == _before)
+
+# An explicit refresh is the user overriding the back-off.
+OPT.clear_cache()
+check("manual refresh lifts the cooldown", OPT.cooldown_remaining() == 0)
+
+# A non-rate-limit error gets the shorter cooldown.
+OPT.yf = type("_M", (), {"Ticker": staticmethod(
+    lambda t: (_ for _ in ()).throw(ConnectionError("dns failure"))
+)})
+OPT.clear_cache()
+OPT.list_expiries("AAPL")
+check("generic errors get the short cooldown", 0 < OPT.cooldown_remaining() <= 120)
+OPT.clear_cache()
+
 # ── yfinance missing entirely ────────────────────────────────────────────────
 OPT._HAS_YF = False
 OPT.clear_cache()
