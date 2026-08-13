@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 warnings.filterwarnings("ignore")
 
 import numpy as np
+import pandas as pd
 
 from svp import features as F
 from svp.models import (
@@ -158,6 +159,55 @@ check("option chain has calls and puts", not chain.calls.empty and not chain.put
 check("chain exposes strike/IV columns",
       {"strike", "impliedVolatility"} <= set(chain.calls.columns))
 check("expiry list non-empty", len(OPT.list_expiries("AAPL")) > 0)
+
+# ── Full report covers every tab ─────────────────────────────────────────────
+# The report is the only place data from all tabs converges, so assert section
+# coverage rather than just byte count — a stubbed section still produces bytes.
+_opts = {
+    "expiry": chain.expiry, "source": "synthetic", "spot": 190.0, "kind": "call",
+    "strike": 195.0, "sigma": 0.28, "bs_price": bs_c.price, "binomial_price": bino_eu,
+    "mc_price": mc_opt["price"], "delta": bs_c.delta, "gamma": bs_c.gamma,
+    "theta": bs_c.theta, "vega": bs_c.vega, "rho": bs_c.rho, "projected_st": 399.43,
+    "futures_fair_value": fut.fair_value, "futures_basis": fut.basis,
+    "futures_carry": fut.annualized_carry,
+}
+_screener = pd.DataFrame({"Ticker": ["AAPL", "MSFT"], "Margin of Safety": [0.16, 0.05]})
+_full_kwargs = dict(
+    features=feats, fundamentals={"sector": "Technology", "revenue": 3.8e11, "eps": 6.5},
+    backtest=bt, regime=calm, technical=tech, sizing=szr, filings=fdv,
+    screener=_screener, options=_opts, excess_return=0.031,
+)
+full = reports.build_report(
+    "AAPL", "Apple Inc.", 190.0,
+    {"point": res.point, "low": res.low, "median": res.median, "high": res.high},
+    "Fairly Valued", attr.as_frame(),
+    {"intrinsic_per_share": dres.intrinsic_per_share}, pdf,
+    {"cpi": 314.0, "fed_funds": 4.3, "yield_curve": -0.1},
+    **_full_kwargs,
+)
+check("full report is larger than the summary-only report", len(full) > len(report))
+
+# Text fallback must carry the same sections as the PDF.
+_had_reportlab = reports._HAS_REPORTLAB
+reports._HAS_REPORTLAB = False
+try:
+    text_report = reports.build_report(
+        "AAPL", "Apple Inc.", 190.0,
+        {"point": res.point, "low": res.low, "median": res.median, "high": res.high},
+        "Fairly Valued", attr.as_frame(),
+        {"intrinsic_per_share": dres.intrinsic_per_share}, pdf,
+        {"cpi": 314.0, "fed_funds": 4.3, "yield_curve": -0.1},
+        **_full_kwargs,
+    ).decode("utf-8")
+finally:
+    reports._HAS_REPORTLAB = _had_reportlab
+
+for _section in (
+    "VALUATION", "FUNDAMENTALS", "MODEL INPUT FEATURES", "SIGNAL BACKTEST",
+    "EXECUTION & TIMING", "POSITION SIZING", "FILING DIVERGENCE",
+    "OPTIONS & FUTURES", "MACRO BACKDROP", "PEER BENCHMARKING", "SCREENER",
+):
+    check(f"report section present: {_section}", _section in text_report)
 
 # ── Result ────────────────────────────────────────────────────────────────────
 print()
