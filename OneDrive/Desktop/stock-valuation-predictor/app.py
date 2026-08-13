@@ -91,6 +91,48 @@ def get_market_cached(ticker: str, fallback_price: float):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# CACHED PER-TICKER ANALYTICS
+#
+# Streamlit re-runs the whole script on every widget interaction, and tab
+# bodies are NOT lazy — the code under all 11 tabs executes every time. Without
+# these wrappers, dragging a slider on the Options tab re-ran the backtest, the
+# DCF Monte-Carlo and two SEC fetches, which is what got the app CPU-throttled.
+# Keyed on the ticker rather than on DataFrames so the cache lookup stays cheap.
+# ──────────────────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_backtest_cached(ticker: str, fallback_price: float, threshold: float = 0.05):
+    hist = get_market_cached(ticker, fallback_price).history
+    if hist is None or hist.empty:
+        return [], None
+    return bt_mod.run_backtest(hist), bt_mod.equity_curve(hist, threshold=threshold)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_facts_cached(cik: str):
+    return sec_mod.get_financials(cik) if cik else {}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_quality_cached(cik: str, market_cap: float | None):
+    return quality_mod.compute_quality(get_facts_cached(cik), market_cap)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_insider_cached(ticker: str, cik: str):
+    return insider_mod.get_insider_signal(ticker, cik)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_dcf_mc_cached(fcf0: float, shares: float, net_debt: float, wacc: float,
+                      terminal_growth: float, growth_rate: float, n: int = 4000):
+    return dcf_mod.monte_carlo_dcf(
+        dcf_mod.DCFInputs(fcf0=fcf0, shares=shares, net_debt=net_debt, wacc=wacc,
+                          terminal_growth=terminal_growth, growth_rate=growth_rate),
+        n=n,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # SIDEBAR
 # ──────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -445,7 +487,8 @@ with tabs[2]:
     )
     dcf_res = dcf_mod.run_dcf(dcf_in)
     st.session_state["rep_dcf"] = dcf_res
-    dcf_mc = dcf_mod.monte_carlo_dcf(dcf_in, n=4000)
+    dcf_mc = get_dcf_mc_cached(float(fcf0), float(shares), float(net_debt),
+                               wacc, tgrowth, ngrowth)
 
     d1, d2, d3, d4 = st.columns(4)
     d1.markdown(metric_card("DCF Intrinsic / Share", f"${dcf_res.intrinsic_per_share:.2f}"), unsafe_allow_html=True)
@@ -548,7 +591,7 @@ with tabs[4]:
         f"Price history source: **{md.source}**."
     )
 
-    results = bt_mod.run_backtest(md.history)
+    results, curve = get_backtest_cached(tk, price)
     st.session_state["rep_backtest"] = results
     if not results:
         st.warning("Not enough price history to backtest this ticker.")
@@ -562,7 +605,6 @@ with tabs[4]:
                 )
                 st.caption(f"Avg fwd return after BUY: {r.avg_forward_return*100:+.1f}%")
 
-        curve = bt_mod.equity_curve(md.history)
         if curve is not None:
             st.markdown('<div class="section-header">Strategy vs Buy & Hold (growth of $1)</div>',
                         unsafe_allow_html=True)
@@ -666,9 +708,8 @@ with tabs[6]:
     st.caption("Forensic-accounting scores prevent the model from rating structurally "
                "broken companies as bargains.")
 
-    facts = sec_mod.get_financials(raw["cik"]) if raw.get("cik") else {}
     with st.spinner("Computing quality & distress scores..."):
-        qs = quality_mod.compute_quality(facts, raw.get("market_cap"))
+        qs = get_quality_cached(raw.get("cik") or "", raw.get("market_cap"))
     st.session_state["rep_quality"] = qs
 
     qc1, qc2, qc3 = st.columns(3)
@@ -708,7 +749,7 @@ with tabs[6]:
     st.divider()
     st.markdown('<div class="section-header">👥 Insider Activity & Short Interest</div>', unsafe_allow_html=True)
     with st.spinner("Fetching Form 4 & short interest..."):
-        ins = insider_mod.get_insider_signal(tk, raw.get("cik"))
+        ins = get_insider_cached(tk, raw.get("cik") or "")
     st.session_state["rep_insider"] = ins
     ic1, ic2, ic3 = st.columns(3)
     ic1.metric("Insider Net Flow", ins.net_direction,
@@ -1230,16 +1271,14 @@ with tabs[10]:
             if "Backtest" in want:
                 backtest_payload = (
                     st.session_state.get("rep_backtest")
-                    or (bt_mod.run_backtest(md.history) if not md.history.empty else None)
+                    or (get_backtest_cached(tk, price)[0] or None)
                 )
 
             quality_payload = None
             if "Guardrails & insider flow" in want:
                 quality_payload = st.session_state.get("rep_quality")
                 if quality_payload is None and raw.get("cik"):
-                    quality_payload = quality_mod.compute_quality(
-                        sec_mod.get_financials(raw["cik"]), raw.get("market_cap")
-                    )
+                    quality_payload = get_quality_cached(raw["cik"], raw.get("market_cap"))
 
             pdf_bytes = reports.build_report(
                 ticker=tk,
