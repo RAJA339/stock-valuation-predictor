@@ -17,34 +17,119 @@ import requests
 
 from . import storage
 
-_HEADERS = {"User-Agent": "StockValuationApp contact@example.com"}
+# SEC requires a descriptive User-Agent with contact info; generic agents get
+# 403-ed. See https://www.sec.gov/os/webmaster-faq#developers
+_HEADERS = {
+    "User-Agent": "StockValuationPredictor/1.0 (educational; contact@example.com)",
+    "Accept-Encoding": "gzip, deflate",
+    "Host": "www.sec.gov",
+}
+
+# Concept-name variants. Filers tag the same line item differently — notably
+# equity, where a company with minority interests uses the long form — so a
+# single tag name silently returns None for a large share of real companies.
+NET_INCOME_TAGS = [
+    "NetIncomeLoss",
+    "ProfitLoss",
+    "NetIncomeLossAvailableToCommonStockholdersBasic",
+    "IncomeLossFromContinuingOperationsIncludingPortionAttributableToNoncontrollingInterest",
+]
+EQUITY_TAGS = [
+    "StockholdersEquity",
+    "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+    "Equity",
+    "EquityAttributableToOwnersOfParent",
+]
+ASSETS_TAGS = ["Assets"]
+REVENUE_TAGS = [
+    "Revenues",
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "RevenueFromContractWithCustomerIncludingAssessedTax",
+    "SalesRevenueNet",
+    "SalesRevenueGoodsNet",
+    "Revenue",
+]
+OCF_TAGS = [
+    "NetCashProvidedByUsedInOperatingActivities",
+    "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+    "CashFlowsFromUsedInOperatingActivities",
+]
+CAPEX_TAGS = [
+    "PaymentsToAcquirePropertyPlantAndEquipment",
+    "PaymentsToAcquireProductiveAssets",
+    "PurchaseOfPropertyPlantAndEquipment",
+]
+DEBT_TAGS = ["LongTermDebt", "LongTermDebtNoncurrent", "LongTermBorrowings"]
+
+# Forms that carry a full year. 20-F is filed by foreign private issuers and
+# 40-F by Canadian ones — excluding them shut out every non-US-domiciled
+# company on the exchange.
+ANNUAL_FORMS = ("10-K", "20-F", "40-F", "10-K/A", "20-F/A")
+
+# XBRL taxonomies to search, in order. IFRS filers publish under ifrs-full.
+_TAXONOMIES = ("us-gaap", "ifrs-full")
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 
 # Module-level memo for the (large) ticker→CIK map within a single process.
+# _ticker_map_at records when it was last *successfully* built, so a transient
+# SEC failure does not poison the process: previously a single failed fetch
+# stored {} and the `is None` guard then skipped every retry, making every
+# ticker unresolvable until restart.
 _ticker_map: Optional[dict] = None
+_ticker_map_at: float = 0.0
+_TICKER_MAP_RETRY = 120.0
+
+
+def _ticker_variants(ticker: str) -> list[str]:
+    """
+    Symbol spellings to try.
+
+    Share classes are written three ways in the wild — BRK.B, BRK-B, BRKB —
+    and SEC's file uses the hyphen form.
+    """
+    t = ticker.upper().strip()
+    out = [t, t.replace(".", "-"), t.replace("-", "."), t.replace(".", "").replace("-", "")]
+    seen, uniq = set(), []
+    for v in out:
+        if v and v not in seen:
+            seen.add(v)
+            uniq.append(v)
+    return uniq
 
 
 def get_cik(ticker: str) -> Optional[str]:
     """Map a ticker symbol to its zero-padded 10-digit SEC CIK."""
-    global _ticker_map
+    global _ticker_map, _ticker_map_at
     ticker = ticker.upper().strip()
 
     cached = storage.cache_get(f"cik:{ticker}")
     if cached:
         return cached
 
-    if _ticker_map is None:
+    # Rebuild when we have never succeeded, or the last attempt failed and the
+    # retry window has passed. Never leave a failed fetch cached indefinitely.
+    stale = (not _ticker_map) and (time.time() - _ticker_map_at > _TICKER_MAP_RETRY)
+    if _ticker_map is None or stale:
         try:
-            data = requests.get(_TICKERS_URL, headers=_HEADERS, timeout=10).json()
-            _ticker_map = {e["ticker"].upper(): str(e["cik_str"]).zfill(10) for e in data.values()}
+            resp = requests.get(_TICKERS_URL, headers=_HEADERS, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            built = {e["ticker"].upper(): str(e["cik_str"]).zfill(10) for e in data.values()}
+            if built:
+                _ticker_map = built
         except Exception:
-            _ticker_map = {}
+            if _ticker_map is None:
+                _ticker_map = {}
+        finally:
+            _ticker_map_at = time.time()
 
-    cik = _ticker_map.get(ticker)
-    if cik:
-        storage.cache_set(f"cik:{ticker}", cik, ttl=7 * 24 * 3600)
-    return cik
+    for variant in _ticker_variants(ticker):
+        cik = (_ticker_map or {}).get(variant)
+        if cik:
+            storage.cache_set(f"cik:{ticker}", cik, ttl=7 * 24 * 3600)
+            return cik
+    return None
 
 
 def get_financials(cik: str) -> dict:
@@ -64,22 +149,54 @@ def get_financials(cik: str) -> dict:
 
 
 def _entries(facts: dict, concept: str, unit: str = "USD") -> list:
+    """
+    All reported values for a concept.
+
+    Searches every taxonomy, not just us-gaap, so IFRS filers resolve. If the
+    requested unit is absent the first available unit is used — some filers
+    report in USD, others in their reporting currency under a different key,
+    and returning nothing is worse than returning the value they filed.
+    """
     try:
-        return facts["facts"]["us-gaap"][concept]["units"][unit]
+        blocks = facts["facts"]
     except (KeyError, TypeError):
         return []
 
+    for tax in _TAXONOMIES:
+        try:
+            units = blocks[tax][concept]["units"]
+        except (KeyError, TypeError):
+            continue
+        if unit in units:
+            return units[unit]
+        for key, vals in units.items():
+            if key.startswith(unit[:3]) or unit == "USD":
+                return vals
+    return []
+
 
 def extract_latest(facts: dict, concept: str, unit: str = "USD") -> Optional[float]:
-    """Most recent *annual* (10-K) value for a concept."""
-    annual = [e for e in _entries(facts, concept, unit) if e.get("form") == "10-K" and "end" in e]
-    if not annual:
+    """
+    Most recent annual value for a concept.
+
+    Tries the annual forms first (10-K plus 20-F / 40-F for foreign issuers),
+    then falls back to the most recent filing of any form. Restricting this to
+    10-K alone returned None for every foreign private issuer and for any
+    company whose facts carried only quarterlies — which read to the user as
+    "no data for this company" when the data was there all along.
+    """
+    entries = [e for e in _entries(facts, concept, unit) if "end" in e and e.get("val") is not None]
+    if not entries:
         return None
-    annual.sort(key=lambda x: x["end"], reverse=True)
-    return annual[0]["val"]
+
+    annual = [e for e in entries if e.get("form") in ANNUAL_FORMS]
+    pool = annual or entries
+    pool.sort(key=lambda x: (x["end"], x.get("filed", "")), reverse=True)
+    return pool[0]["val"]
 
 
-def extract_history(facts: dict, concept: str, unit: str = "USD", forms=("10-K", "10-Q")) -> list[dict]:
+def extract_history(facts: dict, concept: str, unit: str = "USD",
+                    forms=ANNUAL_FORMS + ("10-Q", "6-K")) -> list[dict]:
     """
     Return a de-duplicated, chronologically sorted history for a concept.
 

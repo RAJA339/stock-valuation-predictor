@@ -301,10 +301,26 @@ if run_btn:
         with st.spinner(f"Analyzing **{ticker}** — SEC EDGAR · market · macro · sentiment..."):
             analysis = run_analysis(ticker, manual_price, transcript, use_live_price)
         if analysis is None:
-            st.error(
-                f"❌ Could not retrieve sufficient fundamentals for **{ticker}**. "
-                "Try a major US-listed company (e.g. AAPL, MSFT, GOOGL, JPM)."
-            )
+            _cik = sec_mod.get_cik(ticker)
+            if not _cik:
+                st.error(
+                    f"❌ **{ticker}** has no SEC CIK — it does not file with the SEC.\n\n"
+                    "This covers ETFs and index symbols (SPY, QQQ, ^VIX), most non-US "
+                    "listings, and crypto or FX pairs. The valuation model is built on SEC "
+                    "filings, so it can only run on SEC registrants — including foreign "
+                    "companies that file 20-F or 40-F, such as TSM, SAP, SHOP or BABA.\n\n"
+                    "If you expected this ticker to work, check the symbol: share classes "
+                    "are written BRK-B on EDGAR rather than BRK.B (both are accepted here)."
+                )
+            else:
+                st.error(
+                    f"❌ Found **{ticker}** (CIK {_cik}) at the SEC, but could not parse "
+                    "usable fundamentals from its filings.\n\n"
+                    "Most often this is a company that has filed with the SEC but has not "
+                    "yet published XBRL financial facts — a recent IPO, a shell or a trust. "
+                    "It can also mean SEC EDGAR is rate-limiting or unreachable right now, "
+                    "in which case the same ticker will work shortly."
+                )
         else:
             st.session_state["analysis"] = analysis
 
@@ -559,6 +575,15 @@ with tabs[0]:
 # TAB 2 — VALUATION
 # ══════════════════════════════════════════════════════════════════════════════
 with tabs[1]:
+    _missing = raw.get("missing_fields") or []
+    if _missing:
+        st.info(
+            f"ℹ️ **{tk}** does not tag {', '.join(_missing)} in a form this parser "
+            f"recognises, so those inputs are blank. The model handles missing features "
+            f"natively — the valuation still runs, but any ratio built on them is absent "
+            f"from the feature table and the SHAP breakdown."
+        )
+
     left, right = st.columns([1.1, 1])
 
     with left:

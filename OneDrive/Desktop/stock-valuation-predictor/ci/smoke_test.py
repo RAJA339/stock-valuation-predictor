@@ -25,7 +25,8 @@ from svp.models import (
     regime as RG, sizing as SZ, derivatives as DV,
 )
 from svp.analytics import peers as P, technical as TA, indicators as IND, accuracy as ACC
-from svp.data import storage, sentiment, market, filings_nlp as NLP, options as OPT, intraday as INTRA
+from svp.data import (storage, sentiment, market, filings_nlp as NLP,
+                      options as OPT, intraday as INTRA, sec as SEC)
 from svp import charts
 from svp import reports
 
@@ -312,6 +313,37 @@ _png = charts.render(_iset.df, "AAPL", "15m")
 check("chart renders to PNG", _png[:4] == b"\x89PNG" and len(_png) > 20000)
 check("signal strip renders", charts.signal_strip(_iset)[:4] == b"\x89PNG")
 check("chart handles an empty frame", charts.render(pd.DataFrame(), "AAPL", "15m") == b"")
+
+# ── SEC coverage: the parser must not reject well-formed filings ─────────────
+def _facts(tax="us-gaap", concept="StockholdersEquity", form="10-K", unit="USD", val=6e10):
+    return {"facts": {tax: {concept: {"units": {unit: [
+        {"end": "2025-12-31", "val": val, "form": form, "filed": "2026-02-01"}]}}}}}
+
+# Foreign private issuers file 20-F / 40-F, not 10-K. Excluding those forms
+# shut every non-US-domiciled listing out of the app.
+for _form in ("10-K", "20-F", "40-F", "10-Q"):
+    check(f"{_form} filer resolves", SEC.extract_latest(_facts(form=_form), "StockholdersEquity") == 6e10)
+check("IFRS taxonomy resolves",
+      SEC.extract_latest(_facts(tax="ifrs-full", concept="Equity"), "Equity") == 6e10)
+check("non-USD reporting currency resolves",
+      SEC.extract_latest(_facts(unit="EUR"), "StockholdersEquity") == 6e10)
+
+# Equity is the tag most often filed under the long form; a single tag name
+# returns None for any company carrying a minority interest.
+_longform = _facts(concept="StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest")
+check("equity long-form tag resolves via variants",
+      SEC.concept_first(_longform, SEC.EQUITY_TAGS) == 6e10)
+check("the single-tag lookup it replaced did not",
+      SEC.extract_latest(_longform, "StockholdersEquity") is None)
+
+_mixed = {"facts": {"us-gaap": {"Assets": {"units": {"USD": [
+    {"end": "2026-03-31", "val": 111, "form": "10-Q", "filed": "2026-04-20"},
+    {"end": "2025-12-31", "val": 999, "form": "10-K", "filed": "2026-02-01"}]}}}}}
+check("annual filing preferred over a newer quarterly",
+      SEC.extract_latest(_mixed, "Assets") == 999)
+check("share-class variants are tried", "BRK-B" in SEC._ticker_variants("BRK.B"))
+check("missing concept still returns None", SEC.extract_latest(_facts(), "NoSuchConcept") is None)
+check("malformed facts do not raise", SEC.extract_latest({"nope": 1}, "Assets") is None)
 
 # ── Result ────────────────────────────────────────────────────────────────────
 print()
