@@ -153,6 +153,59 @@ edge = DV.bridge_call_edge(projected_ST=399.43, strike=300.0, T=1.0, r=0.045,
 check("bridge edge is finite", np.isfinite(edge.edge))
 check("bridge P(ITM) in [0,1]", 0.0 <= edge.prob_itm <= 1.0)
 
+# ── Distribution-aware bridge ─────────────────────────────────────────────────
+_spot, _target, _Tb, _rb = 280.0, 399.43, 1.0, 0.045
+_vals = np.random.default_rng(5).normal(_target, 40.0, 20000)
+
+# With no diffusion and full convergence the terminal law collapses onto the
+# value draws, so the MC scorer must reproduce the point estimator.
+_flat = DV.terminal_distribution(_spot, np.full(5000, _target), _Tb, sigma=0.0, convergence=1.0)
+check("zero-vol terminal collapses to the target", np.allclose(_flat, _target))
+_mc_flat = DV.bridge_edge_mc(_flat, 300.0, _Tb, _rb, market_price=45.0, spot=_spot, kind="call")
+_pt = DV.bridge_call_edge(_target, 300.0, _Tb, _rb, 45.0, 0.30, _spot, "call")
+check("degenerate MC edge matches the point estimator",
+      abs(_mc_flat.edge - _pt.edge) < 1e-6)
+
+# convergence=0 means no re-rating: the anchor stays at spot.
+_noconv = DV.terminal_distribution(_spot, _vals, _Tb, sigma=0.0, convergence=0.0)
+check("zero convergence anchors on spot", np.allclose(_noconv, _spot))
+
+# Jensen: integrating a convex payoff must not fall below the point evaluation
+# at the same mean.
+_term = DV.terminal_distribution(_spot, _vals, _Tb, sigma=0.30, convergence=1.0)
+_mean = float(_term.mean())
+for _k in (250.0, 300.0, 350.0, 450.0):
+    _e = DV.bridge_edge_mc(_term, _k, _Tb, _rb, market_price=1.0, spot=_spot, kind="call")
+    _point_payoff = max(_mean - _k, 0.0)
+    check(f"Jensen holds at K={_k:.0f} (E[max] >= max(E)-K)",
+          _e.expected_payoff >= _point_payoff - 1e-6)
+
+_e300 = DV.bridge_edge_mc(_term, 300.0, _Tb, _rb, market_price=45.0, spot=_spot,
+                          kind="call", market_iv=0.30)
+check("MC method is labelled", _e300.method == "monte-carlo")
+check("MC P(ITM) in [0,1]", 0.0 <= _e300.prob_itm <= 1.0)
+check("MC discounts the expected payoff",
+      _e300.expected_payoff_pv < _e300.expected_payoff)
+check("payoff p90 >= p50", _e300.payoff_p90 >= _e300.payoff_p50)
+check("risk-neutral price computed when IV supplied", _e300.risk_neutral_price > 0)
+check("view premium = model PV - risk-neutral PV",
+      abs(_e300.view_premium - (_e300.expected_payoff_pv - _e300.risk_neutral_price)) < 1e-9)
+
+# A bullish view must produce a positive view premium; a bearish one must not.
+_bear = DV.terminal_distribution(_spot, np.full(5000, 200.0), _Tb, sigma=0.30, convergence=1.0)
+_e_bear = DV.bridge_edge_mc(_bear, 300.0, _Tb, _rb, 45.0, _spot, "call", market_iv=0.30)
+check("bearish view yields no positive view premium", _e_bear.view_premium < _e300.view_premium)
+
+# Deeper strikes must be monotonically less likely to finish in the money.
+_probs = [DV.bridge_edge_mc(_term, k, _Tb, _rb, 1.0, _spot, "call").prob_itm
+          for k in (250.0, 300.0, 350.0, 450.0)]
+check("P(ITM) decreases as call strikes rise", all(a >= b for a, b in zip(_probs, _probs[1:])))
+
+# Empty samples must degrade, not raise.
+_empty = DV.bridge_edge_mc(np.array([]), 300.0, _Tb, _rb, 45.0, _spot, "call", market_iv=0.3)
+check("empty terminal distribution falls back to the point estimator",
+      _empty.method == "point")
+
 # ── Option chain pipeline (synthetic fallback offline) ───────────────────────
 chain = OPT.get_option_chain("AAPL", spot_fallback=190.0)
 check("option chain has calls and puts", not chain.calls.empty and not chain.puts.empty)

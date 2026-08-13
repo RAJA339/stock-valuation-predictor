@@ -195,10 +195,125 @@ class OptionEdge:
     market_price: float
     model_iv: Optional[float]
     bs_price_market_iv: Optional[float]
-    prob_itm: float             # risk-neutral-ish P(S_T > K) using target as drift anchor
-    expected_payoff: float      # using projected S_T (ML/DCF target)
-    edge: float                 # expected_payoff_pv - market_price
+    prob_itm: float             # P(S_T beyond K) under the assumed terminal law
+    expected_payoff: float      # undiscounted expected intrinsic at expiry
+    edge: float                 # PV(expected payoff) - market_price
     verdict: str
+    method: str = "point"       # "point" | "monte-carlo"
+    expected_payoff_pv: float = float("nan")
+    payoff_p50: float = float("nan")
+    payoff_p90: float = float("nan")
+    risk_neutral_price: float = float("nan")   # BS value at the market's own IV
+    view_premium: float = float("nan")         # model PV - risk-neutral PV
+
+
+def terminal_distribution(
+    spot: float,
+    value_samples,
+    T: float,
+    sigma: float,
+    convergence: float = 1.0,
+    seed: int = 11,
+) -> "np.ndarray":
+    """
+    Build a distribution of the underlying at expiry from the valuation model.
+
+    Each Monte-Carlo intrinsic-value draw ``V_i`` defines an anchor
+
+        M_i = spot + convergence * (V_i - spot)
+
+    i.e. how much of the gap between today's price and that fair-value draw is
+    assumed to close by expiry (``convergence=1`` means fully closed, ``0``
+    means the market never re-rates). Lognormal diffusion is then applied
+    around each anchor so that ``E[S_T | M_i] = M_i``:
+
+        S_T = M_i * exp(-0.5*sigma^2*T + sigma*sqrt(T)*Z)
+
+    The result carries both sources of uncertainty the point estimate dropped:
+    the model's uncertainty about fair value, and the price's own diffusion.
+
+    Note this is a **real-world** distribution built from your valuation view,
+    not the risk-neutral law that sets option prices. Any edge computed against
+    it is a statement about your view being right, never an arbitrage.
+    """
+    v = np.asarray(value_samples, dtype=float)
+    v = v[np.isfinite(v)]
+    if v.size == 0 or spot <= 0 or T <= 0:
+        return np.array([], dtype=float)
+
+    anchors = spot + float(convergence) * (v - spot)
+    anchors = np.clip(anchors, 1e-6, None)
+
+    if sigma is None or sigma <= 0:
+        return anchors
+
+    rng = np.random.default_rng(seed)
+    z = rng.standard_normal(anchors.size)
+    return anchors * np.exp(-0.5 * sigma ** 2 * T + sigma * math.sqrt(T) * z)
+
+
+def bridge_edge_mc(
+    terminal: "np.ndarray",
+    strike: float,
+    T: float,
+    r: float,
+    market_price: float,
+    spot: float,
+    kind: str = "call",
+    market_iv: Optional[float] = None,
+) -> OptionEdge:
+    """
+    Score an option by integrating its payoff over the projected terminal
+    distribution, rather than evaluating it at a single target price.
+
+    ``edge`` is the present value of the expected intrinsic payoff minus the
+    market premium. ``view_premium`` isolates how much of that edge comes from
+    the valuation view rather than from volatility: it compares the model PV
+    against the Black-Scholes value at the market's own implied volatility, so
+    a large edge with a near-zero view premium means the model is simply
+    disagreeing about vol, not about direction.
+    """
+    terminal = np.asarray(terminal, dtype=float)
+    if terminal.size == 0 or T <= 0:
+        return bridge_call_edge(spot, strike, T, r, market_price,
+                                market_iv or 0.0, spot, kind)
+
+    disc = math.exp(-r * T)
+    if kind == "call":
+        payoff = np.maximum(terminal - strike, 0.0)
+        prob_itm = float((terminal > strike).mean())
+    else:
+        payoff = np.maximum(strike - terminal, 0.0)
+        prob_itm = float((terminal < strike).mean())
+
+    expected_payoff = float(payoff.mean())
+    expected_pv = disc * expected_payoff
+    edge = expected_pv - market_price
+
+    rn_price = float("nan")
+    view_premium = float("nan")
+    if market_iv and market_iv > 0:
+        rn_price = black_scholes(spot, strike, T, r, market_iv, kind=kind).price
+        view_premium = expected_pv - rn_price
+
+    tol = 0.1 * max(market_price, 1e-6)
+    if edge > tol:
+        verdict = "Underpriced vs view"
+    elif edge < -tol:
+        verdict = "Overpriced vs view"
+    else:
+        verdict = "Fairly priced"
+
+    return OptionEdge(
+        strike=strike, expiry_T=T, market_price=market_price,
+        model_iv=market_iv, bs_price_market_iv=rn_price,
+        prob_itm=prob_itm, expected_payoff=expected_payoff,
+        edge=float(edge), verdict=verdict, method="monte-carlo",
+        expected_payoff_pv=float(expected_pv),
+        payoff_p50=float(np.percentile(payoff, 50)),
+        payoff_p90=float(np.percentile(payoff, 90)),
+        risk_neutral_price=rn_price, view_premium=view_premium,
+    )
 
 
 def bridge_call_edge(
@@ -212,12 +327,15 @@ def bridge_call_edge(
     kind: str = "call",
 ) -> OptionEdge:
     """
-    Score an option using the app's ML/DCF **projected underlying at expiry**
-    (``projected_ST``) as the central estimate of S_T.
+    Point-estimate scorer — superseded by :func:`bridge_edge_mc`.
 
-    ``edge`` compares the present value of the expected intrinsic payoff at that
-    target against the current market premium — positive edge flags a
-    potentially mispriced LEAP.
+    Evaluates the payoff at a single projected ``S_T`` instead of integrating
+    over its distribution, which carries two errors pulling in opposite
+    directions: by Jensen's inequality ``max(E[S]-K, 0) <= E[max(S-K, 0)]``, so
+    a point evaluation understates a convex payoff; and treating a directional
+    target as the expected terminal price overstates it whenever the target
+    sits above spot. Retained for the deterministic fallback in
+    ``bridge_edge_mc`` and for comparison.
     """
     disc = math.exp(-r * T)
     # Expected terminal payoff at the projected target (point estimate).
