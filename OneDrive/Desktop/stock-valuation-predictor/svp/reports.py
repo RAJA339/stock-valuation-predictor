@@ -30,6 +30,7 @@ try:
     from reportlab.lib.units import inch
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable,
+        Image, PageBreak,
     )
 
     _HAS_REPORTLAB = True
@@ -142,6 +143,11 @@ def build_report(
     screener: Optional[pd.DataFrame] = None,
     options: Optional[dict] = None,
     excess_return: Optional[float] = None,
+    chart_png: Optional[bytes] = None,
+    chart_interval: Optional[str] = None,
+    indicators=None,
+    indicator_accuracy: Optional[list] = None,
+    accuracy_horizon: Optional[int] = None,
 ) -> bytes:
     """
     Assemble the full equity report, one section per analysis tab.
@@ -164,6 +170,7 @@ def build_report(
             ticker, company, market_price, valuation, signal_text, dcf, peers,
             features, fundamentals, backtest, regime, technical, sizing,
             quality, insider, filings, screener, options, excess_return, macro,
+            indicators, indicator_accuracy, chart_interval, accuracy_horizon,
         )
 
     buf = io.BytesIO()
@@ -270,6 +277,64 @@ def build_report(
             )
         story.append(_table(rows, [1.1 * inch] + [1.15 * inch] * 4))
         story.append(Spacer(1, 12))
+
+    # ── Technical chart + indicators ─────────────────────────────────────────
+    if chart_png or indicators is not None or indicator_accuracy:
+        story.append(PageBreak())
+        story.append(Paragraph(
+            f"Technical Analysis{f' — {chart_interval} bars' if chart_interval else ''}", h2))
+
+        if chart_png:
+            try:
+                img = Image(io.BytesIO(chart_png))
+                # Scale to the text width, preserving aspect ratio.
+                avail = 6.9 * inch
+                ratio = img.imageHeight / float(img.imageWidth)
+                img.drawWidth, img.drawHeight = avail, avail * ratio
+                story.append(img)
+                story.append(Spacer(1, 8))
+            except Exception:
+                pass
+
+        if indicators is not None and getattr(indicators, "signals", None):
+            story.append(Paragraph(
+                f"<b>Consensus: {indicators.consensus}</b> — "
+                f"{indicators.bullish} bullish, {indicators.neutral} neutral, "
+                f"{indicators.bearish} bearish across {len(indicators.signals)} indicators "
+                f"(net score {indicators.net_score:+.2f}).", body))
+            story.append(Spacer(1, 6))
+            rows = [["Indicator", "Category", "Value", "Signal", "Reading"]]
+            for s in indicators.signals:
+                rows.append([s.name, s.category, s.display, s.call, s.note[:52]])
+            story.append(_table(rows, [1.45 * inch, 0.8 * inch, 0.8 * inch,
+                                       0.7 * inch, 2.95 * inch]))
+            story.append(Spacer(1, 12))
+
+        if indicator_accuracy:
+            story.append(Paragraph("Measured Signal Accuracy", h2))
+            story.append(Paragraph(
+                f"Each indicator's call is recomputed at every bar and scored against the "
+                f"actual move {accuracy_horizon or 6} bars later. These are realised hit rates "
+                f"on this ticker and interval, not vendor claims. <b>Verdict follows the 95% "
+                f"confidence interval, not the point estimate</b> — a 56% hit rate on 200 "
+                f"signals spans roughly 49–63%, which includes a coin flip. Costs are not "
+                f"modelled: spread and commission can turn a directional edge into a loss.",
+                small))
+            story.append(Spacer(1, 6))
+            rows = [["Indicator", "Signals", "Hit Rate", "95% CI", "Avg Fwd", "Verdict"]]
+            for a in indicator_accuracy:
+                nan = a.hit_rate != a.hit_rate
+                rows.append([
+                    a.name, str(a.n_signals),
+                    "—" if nan else f"{a.hit_rate * 100:.1f}%",
+                    "—" if nan else f"{a.ci_low * 100:.0f}–{a.ci_high * 100:.0f}%",
+                    "—" if a.avg_forward_return != a.avg_forward_return
+                        else f"{a.avg_forward_return * 100:+.3f}%",
+                    a.verdict,
+                ])
+            story.append(_table(rows, [1.6 * inch, 0.65 * inch, 0.75 * inch,
+                                       0.85 * inch, 0.8 * inch, 1.45 * inch]))
+            story.append(Spacer(1, 12))
 
     # ── Backtesting ──────────────────────────────────────────────────────────
     if backtest:
@@ -495,6 +560,8 @@ def _text_report(
     features=None, fundamentals=None, backtest=None, regime=None, technical=None,
     sizing=None, quality=None, insider=None, filings=None, screener=None,
     options=None, excess_return=None, macro=None,
+    indicators=None, indicator_accuracy=None, chart_interval=None,
+    accuracy_horizon=None,
 ) -> bytes:
     """Plain-text fallback when ReportLab isn't installed — same coverage as the PDF."""
     W = 62
@@ -614,6 +681,26 @@ def _text_report(
             ("Futures Fair Value", _fmt(options.get("futures_fair_value"), "usd")),
             ("Futures Basis", _fmt(options.get("futures_basis"), "usd")),
         ])
+
+    if indicators is not None and getattr(indicators, "signals", None):
+        lines.extend(["", f"TECHNICAL INDICATORS ({chart_interval or 'intraday'})", "-" * W,
+                      f"Consensus: {indicators.consensus}  "
+                      f"({indicators.bullish} bull / {indicators.neutral} neutral / "
+                      f"{indicators.bearish} bear, net {indicators.net_score:+.2f})"])
+        width = max(len(s.name) for s in indicators.signals)
+        for s_ in indicators.signals:
+            lines.append(f"{s_.name:<{width}} : {s_.display:>10}  {s_.call:<8} {s_.note}")
+
+    if indicator_accuracy:
+        lines.extend(["", f"MEASURED SIGNAL ACCURACY ({accuracy_horizon or 6} bars forward)",
+                      "-" * W,
+                      "Verdict follows the 95% CI, not the point estimate. Costs not modelled."])
+        width = max(len(a.name) for a in indicator_accuracy)
+        for a in indicator_accuracy:
+            nan = a.hit_rate != a.hit_rate
+            rate = "n/a" if nan else f"{a.hit_rate * 100:5.1f}%"
+            ci = "" if nan else f" [{a.ci_low * 100:.0f}-{a.ci_high * 100:.0f}%]"
+            lines.append(f"{a.name:<{width}} : {rate}{ci:<14} n={a.n_signals:<5} {a.verdict}")
 
     if macro:
         section("MACRO BACKDROP", [

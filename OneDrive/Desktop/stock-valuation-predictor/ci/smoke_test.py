@@ -24,8 +24,9 @@ from svp.models import (
     valuation as V, explain as X, dcf as D, backtest as B,
     regime as RG, sizing as SZ, derivatives as DV,
 )
-from svp.analytics import peers as P, technical as TA
-from svp.data import storage, sentiment, market, filings_nlp as NLP, options as OPT
+from svp.analytics import peers as P, technical as TA, indicators as IND, accuracy as ACC
+from svp.data import storage, sentiment, market, filings_nlp as NLP, options as OPT, intraday as INTRA
+from svp import charts
 from svp import reports
 
 failures = []
@@ -261,6 +262,56 @@ for _section in (
     "OPTIONS & FUTURES", "MACRO BACKDROP", "PEER BENCHMARKING", "SCREENER",
 ):
     check(f"report section present: {_section}", _section in text_report)
+
+# ── Intraday, indicators, measured accuracy, charts ──────────────────────────
+for _iv in INTRA.INTERVALS:
+    _bars = INTRA.get_intraday("AAPL", _iv, spot_fallback=302.25)
+    check(f"{_iv} bars returned", len(_bars.df) >= 60)
+    check(f"{_iv} OHLC is internally consistent",
+          bool((_bars.df["High"] >= _bars.df[["Open", "Close"]].max(axis=1) - 1e-9).all()
+               and (_bars.df["Low"] <= _bars.df[["Open", "Close"]].min(axis=1) + 1e-9).all()))
+
+# 10m must be a genuine resample of 5m, not a relabel: half the bars, same span.
+_b5, _b10 = INTRA.get_intraday("AAPL", "5m", 302.25), INTRA.get_intraday("AAPL", "10m", 302.25)
+check("10m bars are twice the width of 5m",
+      abs(len(_b10.df) - len(_b5.df) / 2) <= max(2, len(_b5.df) * 0.1) or _b10.source == "synthetic")
+
+_iset = IND.compute(INTRA.get_intraday("AAPL", "15m", 302.25).df)
+check("indicator set is populated", len(_iset.signals) >= 10)
+check("every signal carries a directional call",
+      all(s.call in (IND.BULLISH, IND.BEARISH, IND.NEUTRAL) for s in _iset.signals))
+check("net score within [-1, 1]", -1.0 <= _iset.net_score <= 1.0)
+check("consensus is a known label",
+      _iset.consensus in {"Strong Buy", "Buy", "Neutral", "Sell", "Strong Sell"})
+check("bull + bear + neutral covers every signal",
+      _iset.bullish + _iset.bearish + _iset.neutral == len(_iset.signals))
+check("RSI stays within 0-100", bool(_iset.df["RSI"].dropna().between(0, 100).all()))
+check("ATR is non-negative", bool((_iset.df["ATR"].dropna() >= 0).all()))
+check("Bollinger upper band sits above lower",
+      bool((_iset.df["BB_UP"].dropna() >= _iset.df["BB_LOW"].dropna()).all()))
+check("Supertrend direction is +/-1", set(_iset.df["ST_DIR"].dropna().unique()) <= {-1.0, 1.0})
+
+_acc = ACC.measure(_iset, horizon=6)
+check("accuracy measured for every indicator", len(_acc) >= 10)
+check("hit rates are probabilities",
+      all(0.0 <= a.hit_rate <= 1.0 for a in _acc if a.hit_rate == a.hit_rate))
+check("confidence interval brackets the estimate",
+      all(a.ci_low <= a.hit_rate <= a.ci_high for a in _acc if a.hit_rate == a.hit_rate))
+check("no indicator is asserted accurate without evidence",
+      all(a.verdict != "Better than chance" or a.significant for a in _acc))
+# On a synthetic random walk the mean hit rate must sit near a coin flip; a
+# measurement engine that reports otherwise is broken or leaking the future.
+_scored = [a.hit_rate for a in _acc if a.hit_rate == a.hit_rate]
+check("random-walk hit rates cluster near 50%", abs(float(np.mean(_scored)) - 0.5) < 0.12)
+check("Wilson interval is sane at n=0", ACC.wilson_interval(0, 0) == (0.0, 0.0))
+check("Wilson interval widens as n shrinks",
+      (ACC.wilson_interval(30, 50)[1] - ACC.wilson_interval(30, 50)[0])
+      > (ACC.wilson_interval(300, 500)[1] - ACC.wilson_interval(300, 500)[0]))
+
+_png = charts.render(_iset.df, "AAPL", "15m")
+check("chart renders to PNG", _png[:4] == b"\x89PNG" and len(_png) > 20000)
+check("signal strip renders", charts.signal_strip(_iset)[:4] == b"\x89PNG")
+check("chart handles an empty frame", charts.render(pd.DataFrame(), "AAPL", "15m") == b"")
 
 # ── Result ────────────────────────────────────────────────────────────────────
 print()
