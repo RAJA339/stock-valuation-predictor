@@ -10,7 +10,9 @@ distribution that complements the ML valuation range.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -108,3 +110,58 @@ def monte_carlo_dcf(
         "p90": float(np.percentile(out, 90)),
         "std": float(np.std(out)),
     }
+
+
+# ── Rate sensitivity ─────────────────────────────────────────────────────────
+@dataclass
+class RateShock:
+    """One point on the fair-value / discount-rate curve."""
+    shock_bp: int               # parallel move in the discount rate, basis points
+    wacc: float
+    intrinsic_per_share: float
+    change_pct: float           # vs the unshocked case
+
+
+def rate_shock(inp: DCFInputs,
+               shocks_bp: Sequence[int] = (-200, -100, -50, 0, 50, 100, 200)) -> list[RateShock]:
+    """
+    Re-run the DCF across a parallel shift in the discount rate.
+
+    "What happens to fair value if the ten-year moves a hundred basis points" is
+    the question every desk runs, and a DCF quoted at a single WACC cannot
+    answer it. The sensitivity is also the honest way to read a DCF: the output
+    is far more sensitive to the discount rate than to the growth assumptions
+    people spend their time arguing about, and showing the curve makes that
+    impossible to miss.
+
+    Shocks are applied to the discount rate only. Terminal growth is deliberately
+    held fixed: in reality a rate move is correlated with growth expectations,
+    but modelling that link would bury a large assumption inside what is meant to
+    be a sensitivity check on one variable.
+    """
+    base = run_dcf(inp).intrinsic_per_share
+    out: list[RateShock] = []
+    for bp in shocks_bp:
+        shocked = DCFInputs(**{**inp.__dict__, "wacc": inp.wacc + bp / 10_000.0})
+        v = run_dcf(shocked).intrinsic_per_share
+        change = ((v - base) / base * 100.0) if base and math.isfinite(base) and base != 0 else float("nan")
+        out.append(RateShock(shock_bp=int(bp), wacc=shocked.wacc,
+                             intrinsic_per_share=float(v), change_pct=float(change)))
+    return out
+
+
+def duration_estimate(shocks: Sequence[RateShock]) -> Optional[float]:
+    """
+    Percentage change in fair value per 100bp of discount rate, near the base.
+
+    Reported as a positive number for a value that falls when rates rise, which
+    is the ordinary direction. Equity duration is not a standard disclosure, so
+    the figure is presented as what it is: the local slope of the curve above,
+    measured between the +/-100bp points rather than differentiated.
+    """
+    by_bp = {s.shock_bp: s.intrinsic_per_share for s in shocks}
+    lo, hi = by_bp.get(-100), by_bp.get(100)
+    base = by_bp.get(0)
+    if not base or lo is None or hi is None or not math.isfinite(base):
+        return None
+    return float((lo - hi) / (2 * base) * 100.0)

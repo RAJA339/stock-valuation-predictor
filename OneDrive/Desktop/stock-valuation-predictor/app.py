@@ -905,6 +905,67 @@ with tab_guard(3):
         "assumptions worth revisiting."
     )
 
+    # ── Rate sensitivity ─────────────────────────────────────────────────────
+    st.markdown(theme.section("If rates move", "Sensitivity"), unsafe_allow_html=True)
+    st.caption(
+        "The same DCF re-run across a parallel shift in the discount rate. This "
+        "is the honest way to read a DCF: the output moves far more with the "
+        "discount rate than with the growth assumptions people spend their time "
+        "arguing about. Terminal growth is deliberately held fixed — in reality "
+        "a rate move and growth expectations are linked, but modelling that here "
+        "would bury a large assumption inside a one-variable sensitivity check."
+    )
+    _shocks = dcf_mod.rate_shock(dcf_in)
+    st.session_state["rep_rate_shock"] = _shocks
+    _dur = dcf_mod.duration_estimate(_shocks)
+
+    _rs1, _rs2 = st.columns([1.35, 1])
+    with _rs1:
+        fig, ax = plt.subplots(figsize=(5.6, 3.2))
+        theme.style_axes(fig, ax)
+        _xs = [s.shock_bp for s in _shocks]
+        _ys = [s.intrinsic_per_share for s in _shocks]
+        ax.plot(_xs, _ys, color=theme.GREEN, lw=2, marker="o", ms=4)
+        ax.axhline(price, color=theme.RED, lw=1.4, ls="--", label=f"Market ${price:.0f}")
+        ax.axvline(0, color=theme.FAINT, lw=1)
+        ax.set_xlabel("Discount-rate shock (bp)")
+        ax.set_ylabel("Fair value / share ($)")
+        ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
+        st.pyplot(fig, width="stretch"); plt.close(fig)
+    with _rs2:
+        if _dur is not None:
+            st.markdown(
+                metric_card("Sensitivity", f"{_dur:.1f}%") +
+                '<div class="metric-note">fair-value change per 100bp, '
+                'measured across the ±100bp points</div>',
+                unsafe_allow_html=True,
+            )
+        _break = [s for s in _shocks if s.intrinsic_per_share < price]
+        if _break:
+            st.markdown(
+                metric_card("Breaks even at", f"{_break[0].shock_bp:+d}bp", sub=True) +
+                '<div class="metric-note">smallest modelled rate rise at which '
+                'fair value falls below the market price</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                metric_card("Breaks even at", "beyond +200bp", sub=True) +
+                '<div class="metric-note">fair value stays above the market '
+                'price across every shock modelled</div>',
+                unsafe_allow_html=True,
+            )
+
+    st.dataframe(
+        pd.DataFrame([{
+            "Shock": f"{s.shock_bp:+d}bp",
+            "Discount rate": f"{s.wacc*100:.2f}%",
+            "Fair value": f"${s.intrinsic_per_share:,.2f}",
+            "Change": f"{s.change_pct:+.1f}%",
+        } for s in _shocks]),
+        width="stretch", hide_index=True,
+    )
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — PEERS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1118,7 +1179,7 @@ with tab_guard(7):
         qs = get_quality_cached(raw.get("cik") or "", raw.get("market_cap"))
     st.session_state["rep_quality"] = qs
 
-    qc1, qc2, qc3 = st.columns(3)
+    qc1, qc2, qc3, qc4 = st.columns(4)
     with qc1:
         pf = f"{qs.piotroski}/9" if qs.piotroski is not None else "N/A"
         st.markdown(metric_card("Piotroski F-Score", pf), unsafe_allow_html=True)
@@ -1131,12 +1192,26 @@ with tab_guard(7):
         mm = f"{qs.beneish_m:.2f}" if qs.beneish_m is not None else "N/A"
         st.markdown(metric_card("Beneish M-Score", mm), unsafe_allow_html=True)
         st.caption(f"{qs.beneish_flag} · >-1.78 manipulation risk")
+    with qc4:
+        aa = f"{qs.accruals*100:.1f}%" if qs.accruals is not None else "N/A"
+        st.markdown(metric_card("Accruals / Assets", aa), unsafe_allow_html=True)
+        st.caption(f"{qs.accruals_flag} · >10% earnings outrunning cash")
+
+    st.caption(
+        "Accruals are the gap between reported profit and operating cash. "
+        "Sloan (1996) found firms whose earnings lean on accruals rather than "
+        "cash go on to underperform. It asks a narrower question than Beneish — "
+        "not whether the statements look manipulated, but whether profit is "
+        "turning into cash — so a company can be entirely honest and still fail "
+        "it. Treat a high reading as a prompt to look, not as an accusation."
+    )
 
     if qs.guardrail_triggered():
         flags = []
         if qs.weak_fundamentals: flags.append("weak fundamentals (low F-Score)")
         if qs.is_distressed: flags.append("bankruptcy-distress zone (low Z-Score)")
         if qs.possible_manipulation: flags.append("earnings-manipulation risk (high M-Score)")
+        if qs.high_accruals: flags.append("earnings running well ahead of cash (high accruals)")
         st.error("🚩 **Guardrail triggered:** " + "; ".join(flags) +
                  ". Treat any 'undervalued' reading with caution — possible value trap.")
     else:
@@ -1153,6 +1228,52 @@ with tab_guard(7):
         st.caption(f"{n}")
 
     st.divider()
+    st.markdown(theme.section("Institutional ownership", ""), unsafe_allow_html=True)
+    _own = insider_mod.get_ownership(tk)
+    st.session_state["rep_ownership"] = _own
+    if _own.source == "unavailable":
+        st.caption(
+            "Ownership data unavailable for this ticker right now. 13F filings "
+            "are indexed on EDGAR by filer rather than by holding, so this comes "
+            "from the market feed and shares its rate limits."
+        )
+    else:
+        _o1, _o2, _o3 = st.columns(3)
+        _o1.markdown(metric_card(
+            "Held by Institutions",
+            f"{_own.pct_institutions:.1f}%" if _own.pct_institutions is not None else "N/A"),
+            unsafe_allow_html=True)
+        _o2.markdown(metric_card(
+            "Held by Insiders",
+            f"{_own.pct_insiders:.1f}%" if _own.pct_insiders is not None else "N/A"),
+            unsafe_allow_html=True)
+        _o3.markdown(metric_card(
+            "Top 5 Holders",
+            f"{_own.top5_pct:.1f}%" if _own.top5_pct is not None else "N/A"),
+            unsafe_allow_html=True)
+        if _own.is_concentrated:
+            st.warning(
+                "Concentrated register — the five largest holders control more "
+                "than a third of the shares outstanding. Exits by any one of "
+                "them move the price more than the fundamentals do."
+            )
+        if _own.holders:
+            st.dataframe(
+                pd.DataFrame([{
+                    "Holder": h["holder"],
+                    "Shares": f"{h['shares']:,.0f}" if h["shares"] else "—",
+                    "% Out": f"{h['pct_out']:.2f}%" if h["pct_out"] is not None else "—",
+                    "Value": f"${h['value']:,.0f}" if h["value"] else "—",
+                    "As of": h["date"] or "—",
+                } for h in _own.holders]),
+                width="stretch", hide_index=True,
+            )
+        st.caption(
+            "13F holdings are reported up to 45 days after quarter end, so this "
+            "view is stale by up to a quarter by construction — that is a "
+            "property of the disclosure, not of this feed."
+        )
+
     st.markdown(theme.section("Insider activity &amp; short interest"), unsafe_allow_html=True)
     with st.spinner("Fetching Form 4 & short interest..."):
         ins = get_insider_cached(tk, raw.get("cik") or "")

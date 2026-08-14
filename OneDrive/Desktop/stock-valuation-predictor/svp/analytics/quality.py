@@ -20,6 +20,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..data import sec
+from ..data.sec import (
+    ASSETS_TAGS, NET_INCOME_TAGS, OCF_TAGS,
+)
 
 
 # ── helpers to pull current & prior annual values ────────────────────────────
@@ -47,6 +50,8 @@ class QualityScores:
     altman_zone: str
     beneish_m: Optional[float]
     beneish_flag: str
+    accruals: Optional[float] = None
+    accruals_flag: str = "n/a"
     notes: list = field(default_factory=list)
 
     @property
@@ -61,8 +66,13 @@ class QualityScores:
     def weak_fundamentals(self) -> bool:
         return self.piotroski is not None and self.piotroski <= 3
 
+    @property
+    def high_accruals(self) -> bool:
+        return self.accruals is not None and self.accruals > 0.10
+
     def guardrail_triggered(self) -> bool:
-        return self.is_distressed or self.possible_manipulation or self.weak_fundamentals
+        return (self.is_distressed or self.possible_manipulation
+                or self.weak_fundamentals or self.high_accruals)
 
 
 # ── Piotroski F-Score ─────────────────────────────────────────────────────────
@@ -203,12 +213,50 @@ def beneish_m_score(facts) -> tuple[Optional[float], str]:
     return float(m), flag
 
 
+def accruals_ratio(facts) -> tuple[Optional[float], str]:
+    """
+    Sloan's accrual ratio: (net income − operating cash flow) / total assets.
+
+    Earnings and cash are the same thing eventually; the gap between them in any
+    one year is accruals. Sloan (1996) found that firms whose earnings lean
+    heavily on accruals rather than cash go on to underperform — the accrual
+    anomaly, one of the more durable results in the literature and still the
+    cheapest earnings-quality check there is.
+
+    It sits beside Beneish deliberately. Beneish asks whether the statements
+    look manipulated; this asks a narrower and more common question — whether
+    reported profit is turning into cash. A company can be entirely honest and
+    still fail it, which is why a high ratio is a flag to investigate rather
+    than an accusation.
+
+    Positive means earnings exceed operating cash flow. Above roughly 10% of
+    assets is the conventional threshold for "high".
+    """
+    ni, _ = _hist2(facts, NET_INCOME_TAGS)
+    ocf, _ = _hist2(facts, OCF_TAGS)
+    assets, _ = _hist2(facts, ASSETS_TAGS)
+
+    if ni is None or ocf is None or not assets:
+        return None, "n/a"
+
+    ratio = (ni - ocf) / assets
+    if ratio > 0.10:
+        flag = "High — earnings well ahead of cash"
+    elif ratio > 0.05:
+        flag = "Elevated"
+    elif ratio < -0.05:
+        flag = "Cash exceeds earnings — conservative"
+    else:
+        flag = "Normal"
+    return float(ratio), flag
+
+
 def compute_quality(facts, market_cap: Optional[float]) -> QualityScores:
     """Compute all three scores from SEC facts; returns a :class:`QualityScores`."""
     notes: list = []
     if not facts:
         return QualityScores(None, {}, None, "Unknown", None, "Unknown",
-                             ["No SEC facts available."])
+                             notes=["No SEC facts available."])
 
     f, f_detail = piotroski_f_score(facts)
     if f is None:
@@ -219,5 +267,8 @@ def compute_quality(facts, market_cap: Optional[float]) -> QualityScores:
     m, m_flag = beneish_m_score(facts)
     if m is None:
         notes.append("Beneish M: insufficient two-year data.")
+    acc, acc_flag = accruals_ratio(facts)
+    if acc is None:
+        notes.append("Accruals: needs net income, operating cash flow and assets.")
 
-    return QualityScores(f, f_detail, z, zone, m, m_flag, notes)
+    return QualityScores(f, f_detail, z, zone, m, m_flag, acc, acc_flag, notes)
