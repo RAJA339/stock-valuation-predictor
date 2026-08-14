@@ -32,6 +32,7 @@ gracefully, so the app runs even without network access or optional libraries.
 
 from __future__ import annotations
 
+import datetime as _dt
 import traceback
 import warnings
 from contextlib import contextmanager
@@ -62,7 +63,7 @@ from svp.features import build_features, FEATURE_LABELS
 from svp.data import (
     market as market_mod, macro as macro_mod, sentiment as sent_mod, storage,
     sec as sec_mod, insider as insider_mod, filings_nlp as nlp_mod,
-    options as options_mod,
+    options as options_mod, predictions as pred_mod,
 )
 from svp.models import (
     valuation as val_mod, explain as explain_mod, dcf as dcf_mod, backtest as bt_mod,
@@ -215,6 +216,33 @@ with st.sidebar:
     run_btn = st.button("Analyze", type="primary", width="stretch")
 
     st.divider()
+
+    # ── Ledger identity ──────────────────────────────────────────────────────
+    # An anonymous key, not a login: a sign-up wall in front of a tool nobody
+    # has used yet costs more traffic than it captures. The key stays out of the
+    # shareable ?t= link on purpose — putting it there would hand a user's whole
+    # track record to whoever opened a result they shared.
+    if "ledger_key" not in st.session_state:
+        st.session_state["ledger_key"] = pred_mod.new_key()
+
+    with st.expander("Track record"):
+        st.caption(
+            "Every valuation you run is saved and scored later against what the "
+            "price actually did. Save this key to keep your record across devices."
+        )
+        st.code(st.session_state["ledger_key"], language=None)
+        _restore = st.text_input(
+            "Restore a key", value="", placeholder="paste a saved key",
+            label_visibility="collapsed",
+        ).strip()
+        if _restore and _restore != st.session_state["ledger_key"]:
+            if pred_mod.valid_key(_restore):
+                st.session_state["ledger_key"] = _restore.lower()
+                st.success("Key restored.")
+            else:
+                st.warning("That does not look like a ledger key.")
+
+    st.divider()
     st.markdown("**Data & Model**")
     st.caption(
         "SEC EDGAR · yfinance/Alpha Vantage · FRED/BLS · FinBERT · "
@@ -360,6 +388,14 @@ if run_btn or _auto_run:
         else:
             st.session_state["analysis"] = analysis
             st.session_state["last_ticker"] = ticker
+            # Log the call to the ledger so it can be scored later. Written
+            # here rather than at render time: the tab bodies re-run on every
+            # widget interaction, and a valuation is made once per analysis.
+            _r = analysis["result"]
+            pred_mod.record(
+                st.session_state["ledger_key"], ticker, analysis["price"],
+                _r.low, _r.point, _r.high, analysis["signal_text"],
+            )
             # Put the ticker in the address bar so this result can be linked to.
             if st.query_params.get("t") != ticker:
                 st.query_params["t"] = ticker
@@ -441,13 +477,14 @@ tabs = st.tabs([
     "Peers", "Backtesting",
     "Execution & Timing", "Guardrails", "Screener", "Filings Δ",
     "Filings RAG", "Options & Futures",
-    "Report",
+    "Report", "Track Record",
 ])
 
 TAB_LABELS = [
     "Charts", "Valuation", "Explainability", "DCF & Scenario", "Peers",
     "Backtesting", "Execution & Timing", "Guardrails", "Screener",
     "Filings Δ", "Filings RAG", "Options & Futures", "Report",
+    "Track Record",
 ]
 
 # Reset per script run. Every tab body re-executes on each rerun, so a failure
@@ -1836,3 +1873,91 @@ with tab_guard(12):
         )
         if ext == "txt":
             st.caption("ReportLab not installed — generated a plain-text report instead of PDF.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 14 — TRACK RECORD
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_guard(13):
+    st.markdown(theme.section("Your saved valuations", "Track record"), unsafe_allow_html=True)
+    st.caption(
+        "Every analysis you run is stored with its p10–p90 band and the price at "
+        "the time, then scored against what the price actually did. No brokerage "
+        "will show you whether its own price targets were right; this does."
+    )
+
+    _key = st.session_state.get("ledger_key", "")
+    _preds = pred_mod.for_key(_key)
+
+    if not _preds:
+        st.info(
+            "Nothing recorded yet. Run an analysis and it appears here — "
+            "your first entry is saved the moment this one finishes."
+        )
+    else:
+        _outcomes = pred_mod.score(
+            _preds, lambda t: market_mod.get_market_data(t).price
+        )
+        _cal = pred_mod.calibration(_outcomes)
+
+        st.markdown(theme.section("Calibration", ""), unsafe_allow_html=True)
+        st.caption(
+            f"If the band is honest, about {_cal.target*100:.0f}% of matured "
+            "predictions should land inside it. A band that captures almost "
+            "everything is too wide to be useful; one that captures far less is "
+            "overconfident. Only predictions past their "
+            f"{pred_mod.DEFAULT_HORIZON_DAYS}-day horizon are scored — a "
+            "one-day-old call has not had time to be right or wrong."
+        )
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.markdown(metric_card("Recorded", f"{len(_preds)}"), unsafe_allow_html=True)
+        k2.markdown(metric_card("Scored", f"{_cal.n}"), unsafe_allow_html=True)
+        if _cal.n:
+            k3.markdown(
+                metric_card("Band Coverage", f"{_cal.coverage*100:.0f}%",
+                            sub=True) +
+                f'<div class="metric-note">95% CI '
+                f'{_cal.ci_low*100:.0f}–{_cal.ci_high*100:.0f}%</div>',
+                unsafe_allow_html=True,
+            )
+            k4.markdown(
+                metric_card("Direction", f"{_cal.hit_rate*100:.0f}%", sub=True) +
+                f'<div class="metric-note">{_cal.n_direction_correct}'
+                f'/{_cal.n_directional} calls</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            k3.markdown(metric_card("Band Coverage", "—"), unsafe_allow_html=True)
+            k4.markdown(metric_card("Direction", "—"), unsafe_allow_html=True)
+
+        st.markdown(
+            f'<div class="verdict"><div class="verdict-line">{_cal.verdict}.'
+            f'</div></div>', unsafe_allow_html=True,
+        )
+
+        st.markdown(theme.section("Ledger", ""), unsafe_allow_html=True)
+        _rows = []
+        for o in _outcomes:
+            p = o.prediction
+            _rows.append({
+                "Date": _dt.datetime.fromtimestamp(p.created_at).strftime("%Y-%m-%d"),
+                "Ticker": p.ticker,
+                "Price then": f"${p.price_at:,.2f}",
+                "Band": f"${p.p10:,.0f} – ${p.p90:,.0f}",
+                "Fair": f"${p.p50:,.2f}",
+                "Price now": f"${o.price_now:,.2f}" if o.price_now is not None else "—",
+                "Move": f"{o.move_pct:+.1f}%" if o.move_pct is not None else "—",
+                "Status": (
+                    "Open" if not p.is_mature
+                    else "In band" if o.inside_band
+                    else "Outside band" if o.inside_band is not None
+                    else "No price"
+                ),
+                "Signal": p.signal or "—",
+            })
+        st.dataframe(pd.DataFrame(_rows), width="stretch", hide_index=True)
+        st.caption(
+            f"Storage: {pred_mod.backend_name()}. Predictions are keyed to the "
+            "anonymous ledger key in the sidebar — save it to keep this record."
+        )
