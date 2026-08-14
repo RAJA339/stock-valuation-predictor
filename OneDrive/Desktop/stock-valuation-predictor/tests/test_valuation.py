@@ -306,3 +306,96 @@ def test_section_helper_emits_eyebrow_only_when_given():
     from svp import theme
     assert "section-eyebrow" in theme.section("Peer group benchmarking", "Peers")
     assert "section-eyebrow" not in theme.section("Piotroski components")
+
+
+# ── SEC transport ────────────────────────────────────────────────────────────
+class TestSecFetch:
+    """
+    The companyfacts request is the one every valuation depends on.
+
+    It was being sent with `Host: www.sec.gov` pinned in the shared header dict
+    while the endpoint is data.sec.gov — a mismatch the CDN may reject. The
+    failure then surfaced as "could not parse usable fundamentals", which
+    blamed the company's filings for a request this app had malformed.
+    """
+
+    def test_no_host_header_is_pinned(self):
+        """requests derives Host from the URL; this package spans two SEC hosts."""
+        from svp.data import sec
+
+        assert "Host" not in sec._HEADERS
+        assert "host" not in {k.lower() for k in sec._HEADERS}
+
+    def test_user_agent_is_still_declared(self):
+        """The SEC 403s generic agents, so this one must survive the fix."""
+        from svp.data import sec
+
+        assert "User-Agent" in sec._HEADERS
+
+    def test_facts_and_ticker_urls_use_different_hosts(self):
+        from svp.data import sec
+
+        assert "data.sec.gov" in sec._FACTS_URL
+        assert "www.sec.gov" in sec._TICKERS_URL
+
+    class _Resp:
+        def __init__(self, status=200, payload=None, raises=False):
+            self.status_code, self._payload, self._raises = status, payload, raises
+
+        def json(self):
+            if self._raises:
+                raise ValueError("not json")
+            return self._payload
+
+    def _fetch(self, monkeypatch, resp=None, exc=None):
+        from svp.data import sec
+
+        sec._LAST_FETCH_ERROR.clear()
+        monkeypatch.setattr(sec.storage, "cache_get", lambda k: None)
+        monkeypatch.setattr(sec.storage, "cache_set", lambda *a, **k: None)
+
+        def get(*a, **k):
+            if exc:
+                raise exc
+            return resp
+
+        monkeypatch.setattr(sec.requests, "get", get)
+        return sec.get_financials("0000215466"), sec.last_fetch_error("0000215466")
+
+    def test_success_clears_the_error(self, monkeypatch):
+        facts, why = self._fetch(
+            monkeypatch, self._Resp(payload={"facts": {"us-gaap": {}}}))
+        assert facts and why is None
+
+    def test_rate_limit_is_named_as_such(self, monkeypatch):
+        _, why = self._fetch(monkeypatch, self._Resp(status=429))
+        assert "rate-limit" in why
+
+    def test_404_is_reported_as_no_xbrl_not_as_a_parse_failure(self, monkeypatch):
+        _, why = self._fetch(monkeypatch, self._Resp(status=404))
+        assert "no XBRL" in why
+
+    def test_server_error_reports_the_status(self, monkeypatch):
+        _, why = self._fetch(monkeypatch, self._Resp(status=503))
+        assert "503" in why
+
+    def test_network_failure_is_distinguished(self, monkeypatch):
+        _, why = self._fetch(monkeypatch, exc=OSError("connection reset"))
+        assert "network error" in why
+
+    def test_non_json_body_is_distinguished(self, monkeypatch):
+        """A 200 carrying HTML is a CDN interstitial, not a filing problem."""
+        _, why = self._fetch(monkeypatch, self._Resp(raises=True))
+        assert "non-JSON" in why
+
+    def test_payload_without_facts_is_distinguished(self, monkeypatch):
+        _, why = self._fetch(monkeypatch, self._Resp(payload={"cik": 215466}))
+        assert "no XBRL facts" in why
+
+    def test_a_cached_hit_reports_no_error(self, monkeypatch):
+        from svp.data import sec
+
+        sec._LAST_FETCH_ERROR["0000215466"] = "stale failure"
+        monkeypatch.setattr(sec.storage, "cache_get", lambda k: {"facts": {}})
+        assert sec.get_financials("0000215466") == {"facts": {}}
+        assert sec.last_fetch_error("0000215466") is None
