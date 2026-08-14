@@ -26,7 +26,7 @@ from svp.analytics import technical as TA
 from svp.data import market as market_mod, macro as macro_mod
 from svp.features import FEATURE_COLUMNS
 
-EXPECTED_TABS = 14
+EXPECTED_TABS = 15
 
 
 def build_seed_analysis():
@@ -197,11 +197,61 @@ def check_ledger_populated(seed):
     print(f"ledger: rows={len(P.for_key(key))} dataframes={len(at.dataframe)}")
 
 
+def check_watchlist_populated(seed):
+    """
+    The Watchlist tab with names on it, and a deterministic calendar.
+
+    Same gap as the ledger: with an empty list the tab renders a placeholder and
+    nothing else executes. The calendar is stubbed rather than fetched so the
+    check tests the rendering, not the runner's route to Yahoo.
+    """
+    import datetime as dt
+
+    from svp.data import _userdb, calendar as C, predictions as P, watchlist as W
+
+    key = _userdb.new_key()
+    for t in ("NVDA", "AAPL"):
+        W.add(key, t)
+    P.record(key, "NVDA", 100.0, 90.0, 110.0, 130.0, "Undervalued", dedupe_hours=0)
+
+    today = dt.date.today()
+    real_earn, real_file = C.next_earnings, C.next_filing
+    C.next_earnings = lambda t: C.Event(t, "Earnings", today + dt.timedelta(days=12), False)
+    C.next_filing = lambda t: C.Event(t, "10-Q", today + dt.timedelta(days=40), True)
+    try:
+        at = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+        at.session_state["analysis"] = seed
+        at.session_state["ledger_key"] = key
+        at.run()
+    finally:
+        C.next_earnings, C.next_filing = real_earn, real_file
+
+    if at.exception:
+        print("APPTEST FAILED — populated watchlist raised:")
+        for e in at.exception:
+            print(" ", repr(e)[:300])
+        sys.exit(1)
+
+    failures = at.session_state["tab_failures"]
+    if failures:
+        print(f"APPTEST FAILED — tabs failed with a populated watchlist: {failures}")
+        sys.exit(1)
+
+    # AAPL is the seeded analysis and is on the list, so the header control must
+    # read as already-followed rather than offering to follow it again.
+    labels = [b.label for b in at.button]
+    if not any("Following" in lb for lb in labels):
+        print(f"APPTEST FAILED — follow control did not reflect state: {labels}")
+        sys.exit(1)
+    print(f"watchlist: names={len(W.get(key))} dataframes={len(at.dataframe)}")
+
+
 def main():
     seed = build_seed_analysis()
     baseline_metrics = check_healthy(seed)
     check_tab_isolation(seed, baseline_metrics)
     check_ledger_populated(seed)
+    check_watchlist_populated(seed)
     print("APPTEST PASSED")
 
 

@@ -27,27 +27,19 @@ Identity is an anonymous key, never a login. See :func:`new_key`.
 
 from __future__ import annotations
 
-import os
-import re
-import sqlite3
-import threading
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+from . import _userdb
 from ..analytics.accuracy import wilson_interval
-
-_DB_FILE = os.environ.get("SVP_SQLITE_PATH", "svp_cache.db")
-_lock = threading.Lock()
 
 # A prediction is scored once this much time has passed. Shorter than the
 # horizon a valuation actually implies — a DCF is a multi-year claim — but the
 # app has to show something before then, so an outcome is marked "open" until
 # the window elapses and the reader is told which is which.
 DEFAULT_HORIZON_DAYS = 90
-
-_KEY_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 _DDL_PG = """
 CREATE TABLE IF NOT EXISTS svp_predictions (
@@ -82,79 +74,26 @@ CREATE TABLE IF NOT EXISTS svp_predictions (
 _IDX = ("CREATE INDEX IF NOT EXISTS svp_pred_key ON svp_predictions (ledger_key)",
         "CREATE INDEX IF NOT EXISTS svp_pred_tkr ON svp_predictions (ticker)")
 
+_PG_DDL = (_DDL_PG, *_IDX)
+_SQ_DDL = (_DDL_SQLITE, *_IDX)
 
-# ── Identity ─────────────────────────────────────────────────────────────────
-def new_key() -> str:
-    """
-    Mint an anonymous ledger key.
-
-    Deliberately not a login. A sign-up wall in front of a tool nobody has used
-    yet costs more traffic than it captures, and this app has no reason to hold
-    an email address.
-
-    The key is also deliberately kept out of the shareable ``?t=`` link. Putting
-    it in the URL would mean a user who shares a result hands their whole track
-    record to whoever opens it — a privacy leak disguised as a feature.
-    """
-    return str(uuid.uuid4())
-
-
-def valid_key(key: str) -> bool:
-    """True for a well-formed key. Used to reject junk before it reaches SQL."""
-    return bool(key) and bool(_KEY_RE.match(key.strip().lower()))
-
-
-# ── Backends ─────────────────────────────────────────────────────────────────
-def _postgres_dsn() -> Optional[str]:
-    return os.environ.get("SVP_DATABASE_URL") or os.environ.get("DATABASE_URL")
-
-
-def _try_postgres():
-    dsn = _postgres_dsn()
-    if not dsn:
-        return None
-    try:
-        import psycopg2  # type: ignore
-
-        conn = psycopg2.connect(dsn)
-        with conn, conn.cursor() as cur:
-            cur.execute(_DDL_PG)
-            for stmt in _IDX:
-                cur.execute(stmt)
-        return conn
-    except Exception:
-        return None
-
-
-_pg_conn = None
-_pg_checked = False
+# Identity lives in _userdb because the watchlist keys off the same value: one
+# key is one person's saved work, whatever kind it is.
+new_key = _userdb.new_key
+valid_key = _userdb.valid_key
+_lock = _userdb.LOCK
 
 
 def _pg():
-    global _pg_conn, _pg_checked
-    if not _pg_checked:
-        _pg_conn = _try_postgres()
-        _pg_checked = True
-    return _pg_conn
+    return _userdb.pg(_PG_DDL)
 
 
-_sqlite_conn: Optional[sqlite3.Connection] = None
-
-
-def _sq() -> sqlite3.Connection:
-    global _sqlite_conn
-    if _sqlite_conn is None:
-        conn = sqlite3.connect(_DB_FILE, check_same_thread=False)
-        conn.execute(_DDL_SQLITE)
-        for stmt in _IDX:
-            conn.execute(stmt)
-        conn.commit()
-        _sqlite_conn = conn
-    return _sqlite_conn
+def _sq():
+    return _userdb.sq(_SQ_DDL)
 
 
 def backend_name() -> str:
-    return "PostgreSQL" if _pg() is not None else "SQLite"
+    return _userdb.backend_name()
 
 
 # ── Records ──────────────────────────────────────────────────────────────────

@@ -64,6 +64,7 @@ from svp.data import (
     market as market_mod, macro as macro_mod, sentiment as sent_mod, storage,
     sec as sec_mod, insider as insider_mod, filings_nlp as nlp_mod,
     options as options_mod, predictions as pred_mod,
+    watchlist as watch_mod, calendar as cal_mod,
 )
 from svp.models import (
     valuation as val_mod, explain as explain_mod, dcf as dcf_mod, backtest as bt_mod,
@@ -452,6 +453,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Following a name has to be one click from the thing you are looking at. A
+# watchlist you can only edit on the watchlist tab does not get built.
+_follow_key = st.session_state.get("ledger_key", "")
+_following = watch_mod.contains(_follow_key, tk)
+if st.button(("Following ✓" if _following else "Follow"), key="follow_btn"):
+    watch_mod.toggle(_follow_key, tk)
+    st.rerun()
+
 # ── Verdict — answered before the tabs, not inside one ───────────────────────
 st.markdown(
     theme.verdict_bar(price, result.low, result.point, result.high),
@@ -477,14 +486,14 @@ tabs = st.tabs([
     "Peers", "Backtesting",
     "Execution & Timing", "Guardrails", "Screener", "Filings Δ",
     "Filings RAG", "Options & Futures",
-    "Report", "Track Record",
+    "Report", "Track Record", "Watchlist",
 ])
 
 TAB_LABELS = [
     "Charts", "Valuation", "Explainability", "DCF & Scenario", "Peers",
     "Backtesting", "Execution & Timing", "Guardrails", "Screener",
     "Filings Δ", "Filings RAG", "Options & Futures", "Report",
-    "Track Record",
+    "Track Record", "Watchlist",
 ]
 
 # Reset per script run. Every tab body re-executes on each rerun, so a failure
@@ -1961,3 +1970,94 @@ with tab_guard(13):
             f"Storage: {pred_mod.backend_name()}. Predictions are keyed to the "
             "anonymous ledger key in the sidebar — save it to keep this record."
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 15 — WATCHLIST
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_guard(14):
+    _key = st.session_state.get("ledger_key", "")
+    _list = watch_mod.get(_key)
+
+    st.markdown(theme.section("Names you are following", "Watchlist"), unsafe_allow_html=True)
+
+    _wc1, _wc2 = st.columns([3, 1])
+    with _wc1:
+        _new = st.text_input(
+            "Add a ticker", value="", max_chars=8, placeholder="e.g. MSFT",
+            label_visibility="collapsed",
+        )
+    with _wc2:
+        if st.button("Add", width="stretch") and _new:
+            if watch_mod.add(_key, _new):
+                st.rerun()
+            else:
+                st.warning(f"'{_new}' is not a symbol this list accepts.")
+
+    if not _list:
+        st.info(
+            "Your watchlist is empty. Add a ticker above, or use the button under "
+            "the quote header to follow the company you are looking at."
+        )
+    else:
+        # ── Where each name sits against its own last valuation ───────────────
+        st.markdown(theme.section("Against your last valuation", ""), unsafe_allow_html=True)
+        st.caption(
+            "For each name you have valued, where the price sits now relative to "
+            "the band you recorded then. Names with no saved valuation show a "
+            "dash — run one and it fills in."
+        )
+        _rows = []
+        for _t in _list:
+            _md = market_mod.get_market_data(_t)
+            _last = pred_mod.for_key(_key, ticker=_t, limit=1)
+            _p = _last[0] if _last else None
+            if _p and _md.price:
+                _where = ("Below band" if _md.price < _p.p10
+                          else "Above band" if _md.price > _p.p90 else "In band")
+                _gap = f"{(_p.p50 - _md.price) / _md.price * 100:+.1f}%"
+                _band = f"${_p.p10:,.0f} – ${_p.p90:,.0f}"
+                _when = _dt.datetime.fromtimestamp(_p.created_at).strftime("%Y-%m-%d")
+            else:
+                _where, _gap, _band, _when = "—", "—", "—", "—"
+            _rows.append({
+                "Ticker": _t,
+                "Price": f"${_md.price:,.2f}" if _md.price else "—",
+                "Your band": _band,
+                "Position": _where,
+                "To fair value": _gap,
+                "Valued on": _when,
+            })
+        st.dataframe(pd.DataFrame(_rows), width="stretch", hide_index=True)
+
+        # ── Calendar ─────────────────────────────────────────────────────────
+        st.markdown(theme.section("What happens next", ""), unsafe_allow_html=True)
+        st.caption(
+            "Earnings dates come from the market feed and are announced. Filing "
+            "dates are **projected** from each company's own filing cadence — "
+            "EDGAR publishes only what has already been filed — so treat them as "
+            "estimates, not commitments."
+        )
+        _events = cal_mod.upcoming(_list)
+        if not _events:
+            st.caption(
+                "No dates available right now. The earnings feed is frequently "
+                "empty between reporting cycles, and a filing projection needs at "
+                "least three past filings to measure a cadence from."
+            )
+        else:
+            st.dataframe(
+                pd.DataFrame([{
+                    "Date": e.date.isoformat(),
+                    "In": f"{e.days_away}d",
+                    "Ticker": e.ticker,
+                    "Event": e.kind,
+                    "Basis": "Projected" if e.projected else "Announced",
+                } for e in _events]),
+                width="stretch", hide_index=True,
+            )
+
+        _drop = st.selectbox("Remove a ticker", ["—"] + _list)
+        if _drop != "—" and st.button(f"Remove {_drop}"):
+            watch_mod.remove(_key, _drop)
+            st.rerun()
