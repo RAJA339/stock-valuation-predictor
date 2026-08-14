@@ -209,3 +209,63 @@ class TestWriteFallback:
         _userdb.reset_for_tests()
         monkeypatch.setattr(_userdb, "_dsn", lambda: None)
         assert [p.ticker for p in P.for_key(key)] == ["NVDA"]
+
+
+# ── DSN resolution ───────────────────────────────────────────────────────────
+class TestDsnResolution:
+    """
+    Where the connection string is read from. The bug this guards: reading only
+    os.environ meant a URL set in Streamlit Cloud's Secrets UI — which lands in
+    st.secrets, not the environment — was silently ignored, leaving the app on
+    SQLite while looking fully configured.
+    """
+
+    def _clear_env(self, monkeypatch):
+        monkeypatch.delenv("SVP_DATABASE_URL", raising=False)
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    def _fake_streamlit(self, monkeypatch, secrets):
+        import types
+        mod = types.ModuleType("streamlit")
+        mod.secrets = secrets
+        monkeypatch.setitem(sys.modules, "streamlit", mod)
+
+    def test_none_when_nothing_is_set(self, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setitem(sys.modules, "streamlit", None)
+        assert _userdb._dsn() is None
+
+    def test_reads_svp_env_var(self, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("SVP_DATABASE_URL", "postgresql://env/db")
+        assert _userdb._dsn() == "postgresql://env/db"
+
+    def test_reads_database_url_alias(self, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("DATABASE_URL", "postgresql://alias/db")
+        assert _userdb._dsn() == "postgresql://alias/db"
+
+    def test_reads_streamlit_secret_when_env_absent(self, monkeypatch):
+        self._clear_env(monkeypatch)
+        self._fake_streamlit(monkeypatch, {"SVP_DATABASE_URL": "postgresql://secret/db"})
+        assert _userdb._dsn() == "postgresql://secret/db"
+
+    def test_environment_beats_secret(self, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("SVP_DATABASE_URL", "postgresql://env/wins")
+        self._fake_streamlit(monkeypatch, {"SVP_DATABASE_URL": "postgresql://secret/loses"})
+        assert _userdb._dsn() == "postgresql://env/wins"
+
+    def test_a_broken_secrets_object_does_not_raise(self, monkeypatch):
+        """No secrets file makes st.secrets raise on access; that must fall to None."""
+        self._clear_env(monkeypatch)
+
+        class Boom:
+            def get(self, *a):
+                raise FileNotFoundError("no secrets.toml")
+
+        import types
+        mod = types.ModuleType("streamlit")
+        mod.secrets = Boom()
+        monkeypatch.setitem(sys.modules, "streamlit", mod)
+        assert _userdb._dsn() is None

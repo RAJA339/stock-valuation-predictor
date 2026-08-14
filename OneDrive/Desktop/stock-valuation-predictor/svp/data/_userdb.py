@@ -51,8 +51,34 @@ def valid_key(key: str) -> bool:
 
 
 # ── Postgres (optional) ──────────────────────────────────────────────────────
+_DSN_NAMES = ("SVP_DATABASE_URL", "DATABASE_URL")
+
+
 def _dsn() -> Optional[str]:
-    return os.environ.get("SVP_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    """
+    The Postgres connection string, from the environment or Streamlit secrets.
+
+    Reads ``st.secrets`` as well as ``os.environ`` because on Streamlit Cloud a
+    value entered in the Secrets UI lands in ``st.secrets`` and is not
+    guaranteed to appear as an environment variable. Reading only the
+    environment was the same latent bug already fixed for the LLM key: the user
+    sets the secret correctly, and the app silently ignores it and stays on
+    SQLite — the worst kind, because everything looks configured.
+    """
+    for name in _DSN_NAMES:
+        val = os.environ.get(name)
+        if val:
+            return val
+    try:
+        import streamlit as st
+
+        for name in _DSN_NAMES:
+            val = st.secrets.get(name)
+            if val:
+                return str(val)
+    except Exception:
+        pass
+    return None
 
 
 _pg_conn = None

@@ -41,6 +41,8 @@ Save. The app restarts automatically. The sidebar note under **Track record**
 changes from a warning to *"Saved to PostgreSQL — your record persists across
 deployments."* That message is the confirmation; there is nothing else to check.
 
+The app reads this from `st.secrets` **and** the environment, so the Secrets UI
+above is enough — you do not also need to set an environment variable.
 `DATABASE_URL` is accepted as an alias, so a platform that injects that name
 automatically (Heroku, Railway, Render) needs no configuration at all.
 
