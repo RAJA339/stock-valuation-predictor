@@ -239,23 +239,40 @@ with st.sidebar:
     st.divider()
 
     # ── Ledger identity ──────────────────────────────────────────────────────
-    # An anonymous key, not a login: a sign-up wall in front of a tool nobody
-    # has used yet costs more traffic than it captures. The key stays out of the
-    # shareable ?t= link on purpose — putting it there would hand a user's whole
-    # track record to whoever opened a result they shared.
+    # An anonymous key, not a login. It is now persisted in the URL as ?id= so a
+    # page reload keeps the same identity instead of minting a fresh one every
+    # time — which was silently splitting one person's ledger across several
+    # keys. This reverses the earlier choice of keeping the key out of the URL:
+    # losing the whole record on every reload was the larger harm, and the key
+    # is an anonymous handle with no personal data behind it. It is a *separate*
+    # parameter from the ?t= ticker, and the note below tells the reader the URL
+    # is now personal — share the ticker, not the raw link.
+    _url_id = (st.query_params.get("id") or "").strip().lower()
     if "ledger_key" not in st.session_state:
-        st.session_state["ledger_key"] = pred_mod.new_key()
+        st.session_state["ledger_key"] = (
+            _url_id if pred_mod.valid_key(_url_id) else pred_mod.new_key()
+        )
+    # Keep the URL carrying the active key so a reload lands on the same ledger.
+    if st.query_params.get("id") != st.session_state["ledger_key"]:
+        st.query_params["id"] = st.session_state["ledger_key"]
 
     with st.expander("Track record"):
         st.caption(
             "Every valuation you run is saved and scored later against what the "
-            "price actually did. Save this key to keep your record across devices."
+            "price actually did. Your identity now lives in this page's URL — "
+            "**bookmark it** and your record follows you back automatically. To "
+            "move it to another device, copy the key below."
         )
         if not _userdb.is_durable():
             st.warning(_userdb.durability_note())
         else:
             st.caption(_userdb.durability_note())
         st.code(st.session_state["ledger_key"], language=None)
+        st.caption(
+            "This link contains your private key. When you want to share an "
+            "analysis, send the ticker — not the full URL."
+        )
+
         _restore = st.text_input(
             "Restore a key", value="", placeholder="paste a saved key",
             label_visibility="collapsed",
@@ -263,9 +280,16 @@ with st.sidebar:
         if _restore and _restore != st.session_state["ledger_key"]:
             if pred_mod.valid_key(_restore):
                 st.session_state["ledger_key"] = _restore.lower()
-                st.success("Key restored.")
+                st.query_params["id"] = _restore.lower()
+                st.rerun()
             else:
                 st.warning("That does not look like a ledger key.")
+
+        if st.button("Start a fresh identity", width="stretch"):
+            _fresh = pred_mod.new_key()
+            st.session_state["ledger_key"] = _fresh
+            st.query_params["id"] = _fresh
+            st.rerun()
 
     st.divider()
     st.markdown("**Data & Model**")
