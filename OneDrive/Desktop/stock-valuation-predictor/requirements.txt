@@ -28,6 +28,11 @@ reportlab>=4.0.0         # one-click PDF equity research reports
 # transformers>=4.40.0
 # torch>=2.2.0
 
-# ── Optional persistent cache backend (PostgreSQL / Snowflake-style) ─────────
-# Set DATABASE_URL and uncomment to use Postgres instead of the SQLite default.
-# psycopg2-binary>=2.9.0
+# ── Durable storage for the ledger and watchlist ─────────────────────────────
+# Not optional any more. SQLite writes to the container filesystem, which a
+# hosted deploy rebuilds on every release — so without this the track record and
+# watchlist are silently erased each time. The driver being absent was a real
+# bug: SVP_DATABASE_URL could be set correctly and the Postgres path would still
+# never activate, because the import it depends on could not succeed.
+# Unused when SVP_DATABASE_URL is unset; see docs/deployment.md.
+psycopg2-binary>=2.9.0

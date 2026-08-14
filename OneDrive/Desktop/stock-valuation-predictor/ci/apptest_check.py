@@ -34,7 +34,7 @@ EXPECTED_PANES = {
     "Charts", "Execution & Timing",
     "Valuation", "Explainability", "DCF & Scenario", "Peers", "Screener",
     "Guardrails", "Backtesting", "Options & Futures",
-    "Ask the Filings", "Fundamental Δ",
+    "Ask the Filings", "Fundamental Δ", "Segments",
     "Watchlist", "Track Record",
     "Report",
 }

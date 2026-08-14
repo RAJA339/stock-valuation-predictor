@@ -64,7 +64,8 @@ from svp.data import (
     market as market_mod, macro as macro_mod, sentiment as sent_mod, storage,
     sec as sec_mod, insider as insider_mod, filings_nlp as nlp_mod,
     options as options_mod, predictions as pred_mod,
-    watchlist as watch_mod, calendar as cal_mod,
+    watchlist as watch_mod, calendar as cal_mod, segments as seg_mod,
+    _userdb,
 )
 from svp.models import (
     valuation as val_mod, explain as explain_mod, dcf as dcf_mod, backtest as bt_mod,
@@ -231,6 +232,10 @@ with st.sidebar:
             "Every valuation you run is saved and scored later against what the "
             "price actually did. Save this key to keep your record across devices."
         )
+        if not _userdb.is_durable():
+            st.warning(_userdb.durability_note())
+        else:
+            st.caption(_userdb.durability_note())
         st.code(st.session_state["ledger_key"], language=None)
         _restore = st.text_input(
             "Restore a key", value="", placeholder="paste a saved key",
@@ -496,7 +501,7 @@ SECTIONS: list[tuple[str, list[str]]] = [
     ("Market",    ["Charts", "Execution & Timing"]),
     ("Value",     ["Valuation", "Explainability", "DCF & Scenario", "Peers", "Screener"]),
     ("Risk",      ["Guardrails", "Backtesting", "Options & Futures"]),
-    ("Filings",   ["Ask the Filings", "Fundamental Δ"]),
+    ("Filings",   ["Ask the Filings", "Fundamental Δ", "Segments"]),
     ("Portfolio", ["Watchlist", "Track Record"]),
     ("Report",    []),
 ]
@@ -2115,6 +2120,11 @@ with tab_guard("Track Record"):
             f"Storage: {pred_mod.backend_name()}. Predictions are keyed to the "
             "anonymous ledger key in the sidebar — save it to keep this record."
         )
+        if not _userdb.is_durable():
+            st.warning(
+                "**This record is not durable.** " + _userdb.durability_note()
+                + " Until then, treat anything here as provisional."
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2206,3 +2216,81 @@ with tab_guard("Watchlist"):
         if _drop != "—" and st.button(f"Remove {_drop}"):
             watch_mod.remove(_key, _drop)
             st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SEGMENTS — revenue by reportable segment, from the latest 10-K
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_guard("Segments"):
+    st.markdown(theme.section("Where the revenue comes from", "Filings"),
+                unsafe_allow_html=True)
+    st.caption(
+        "Revenue by reportable segment, read from the segment disclosure in the "
+        "latest 10-K. This does not come from the XBRL facts API the rest of the "
+        "app uses — that endpoint excludes dimensional facts, and a segment is "
+        "dimensional by definition — so it is parsed from the rendered table "
+        "EDGAR's own viewer displays. Layouts vary by filer, so this fails "
+        "closed: no breakdown rather than a wrong one."
+    )
+
+    _seg = seg_mod.get_segments(tk)
+    st.session_state["rep_segments"] = _seg
+
+    if _seg.confidence == "parsed" and _seg.segments:
+        _shares = _seg.shares()
+        _ordered = sorted(_seg.segments.items(), key=lambda kv: kv[1], reverse=True)
+
+        _sm1, _sm2 = st.columns([1, 1])
+        _sm1.markdown(
+            metric_card("Segments Reported", f"{len(_ordered)}"), unsafe_allow_html=True)
+        _top_name, _top_val = _ordered[0]
+        _sm2.markdown(
+            metric_card("Largest", f"{_shares[_top_name]:.0f}%", sub=True) +
+            f'<div class="metric-note">{_top_name}</div>',
+            unsafe_allow_html=True,
+        )
+
+        if _seg.is_concentrated:
+            st.warning(
+                f"**{_top_name}** carries {_shares[_top_name]:.0f}% of revenue. "
+                "A valuation of this company is largely a valuation of that one "
+                "segment, whatever the consolidated multiples suggest."
+            )
+
+        fig, ax = plt.subplots(figsize=(8, max(2.2, 0.42 * len(_ordered))))
+        theme.style_axes(fig, ax)
+        _names = [n for n, _ in _ordered][::-1]
+        _vals = [v for _, v in _ordered][::-1]
+        ax.barh(_names, _vals, color=theme.GREEN, edgecolor="none")
+        ax.set_xlabel("Revenue ($)")
+        st.pyplot(fig, width="stretch"); plt.close(fig)
+
+        st.dataframe(
+            pd.DataFrame([{
+                "Segment": n,
+                "Revenue": f"${v:,.0f}",
+                "Share": f"{_shares[n]:.1f}%",
+            } for n, v in _ordered]),
+            width="stretch", hide_index=True,
+        )
+        st.caption(
+            f"Source: *{_seg.source_report}*"
+            + (f" · {_seg.period}" if _seg.period else "")
+            + (f" · figures {_seg.scale_note}" if _seg.scale_note else "")
+            + ". Totals, eliminations and reconciling items are excluded so the "
+              "shares sum across operating segments only."
+        )
+    elif _seg.confidence == "table-only":
+        st.info(_seg.note)
+        if _seg.table_html:
+            with st.expander(f"Table as filed — {_seg.source_report}"):
+                st.markdown(_seg.table_html, unsafe_allow_html=True)
+    else:
+        st.info(
+            _seg.note or "No segment disclosure located for this filer."
+        )
+        st.caption(
+            "Common and not an error: a single-segment company has nothing to "
+            "disaggregate, and some filers place the disclosure in a table this "
+            "parser does not recognise."
+        )
