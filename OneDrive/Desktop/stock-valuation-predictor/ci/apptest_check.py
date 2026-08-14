@@ -31,7 +31,7 @@ from svp.features import FEATURE_COLUMNS
 # between sections, so the check is on the pane set the app actually built.
 EXPECTED_SECTIONS = 6
 EXPECTED_PANES = {
-    "Charts", "Execution & Timing",
+    "Charts", "Execution & Timing", "Microstructure",
     "Valuation", "Explainability", "DCF & Scenario", "Peers", "Screener",
     "Guardrails", "Backtesting", "Options & Futures",
     "Ask the Filings", "Fundamental Δ", "Segments",
