@@ -173,3 +173,67 @@ class TestOwnershipCoercion:
         own = INS.get_ownership("NOPE")
         assert own.source == "unavailable"
         assert own.holders == []
+
+
+# ── Navigation structure ─────────────────────────────────────────────────────
+class TestNavigation:
+    """
+    Panes are addressed by label. That is more robust than the index scheme it
+    replaced — inserting a surface no longer renumbers every guard below it —
+    but it moves the failure mode: a typo is now a KeyError at render time
+    rather than a silent off-by-one. These checks catch it statically instead.
+    """
+
+    @staticmethod
+    def _source():
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(here, "app.py"), encoding="utf-8") as fh:
+            return fh.read()
+
+    @staticmethod
+    def _sections(src):
+        import ast
+
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.AnnAssign)
+                    and getattr(node.target, "id", None) == "SECTIONS"):
+                return ast.literal_eval(node.value)
+        raise AssertionError("SECTIONS not found in app.py")
+
+    def test_every_guard_has_a_pane(self):
+        import re
+
+        src = self._source()
+        used = set(re.findall(r'tab_guard\("([^"]+)"\)', src))
+        declared = {"Report"}
+        for name, subs in self._sections(src):
+            declared.add(name) if not subs else declared.update(subs)
+        assert used <= declared, f"guards with no pane: {sorted(used - declared)}"
+
+    def test_every_pane_is_rendered_by_a_guard(self):
+        """An unused pane is an empty tab in the UI — visible, and confusing."""
+        import re
+
+        src = self._source()
+        used = set(re.findall(r'tab_guard\("([^"]+)"\)', src))
+        declared = set()
+        for name, subs in self._sections(src):
+            declared.add(name) if not subs else declared.update(subs)
+        assert declared <= used, f"panes never rendered: {sorted(declared - used)}"
+
+    def test_labels_are_unique(self):
+        """Two panes sharing a label would silently overwrite each other."""
+        src = self._source()
+        labels = []
+        for name, subs in self._sections(src):
+            labels.extend(subs or [name])
+        assert len(labels) == len(set(labels))
+
+    def test_sections_are_small_enough_to_scan(self):
+        """
+        The whole point of the regroup. A section that grows past about five
+        panes has become the flat list this replaced.
+        """
+        for name, subs in self._sections(self._source()):
+            assert len(subs) <= 5, f"{name} has {len(subs)} panes"

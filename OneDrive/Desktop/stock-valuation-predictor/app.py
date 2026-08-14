@@ -481,20 +481,44 @@ h4.markdown(
 
 st.divider()
 
-tabs = st.tabs([
-    "Charts", "Valuation", "Explainability", "DCF & Scenario",
-    "Peers", "Backtesting",
-    "Execution & Timing", "Guardrails", "Screener", "Filings Δ",
-    "Filings RAG", "Options & Futures",
-    "Report", "Track Record", "Watchlist",
-])
-
-TAB_LABELS = [
-    "Charts", "Valuation", "Explainability", "DCF & Scenario", "Peers",
-    "Backtesting", "Execution & Timing", "Guardrails", "Screener",
-    "Filings Δ", "Filings RAG", "Options & Futures", "Report",
-    "Track Record", "Watchlist",
+# ── Navigation ───────────────────────────────────────────────────────────────
+# Fifteen peer tabs is not navigation, it is a list. No terminal presents its
+# surfaces flat, because a reader cannot hold fifteen unranked choices in mind —
+# they scan for the two or three that match what they came to do. Grouping into
+# named sections turns "which of these fifteen" into "which of six, then which
+# of two-to-five", which is the question people can actually answer.
+#
+# Six sections rather than the four originally sketched: forcing Report,
+# Portfolio and Filings into Market/Value/Risk would have produced tidier
+# arithmetic and worse groups. The grouping is by what a reader wants, not by
+# what the code shares.
+SECTIONS: list[tuple[str, list[str]]] = [
+    ("Market",    ["Charts", "Execution & Timing"]),
+    ("Value",     ["Valuation", "Explainability", "DCF & Scenario", "Peers", "Screener"]),
+    ("Risk",      ["Guardrails", "Backtesting", "Options & Futures"]),
+    ("Filings",   ["Ask the Filings", "Fundamental Δ"]),
+    ("Portfolio", ["Watchlist", "Track Record"]),
+    ("Report",    []),
 ]
+
+# Panes are addressed by label, not position. Every previous phase that added a
+# surface had to renumber every guard below it and the CI constant with them;
+# a name does not move when a neighbour is inserted.
+_section_panes = st.tabs([name for name, _ in SECTIONS])
+PANES: dict = {}
+for (_name, _subs), _container in zip(SECTIONS, _section_panes):
+    if not _subs:
+        PANES[_name] = _container
+        continue
+    with _container:
+        for _label, _pane in zip(_subs, st.tabs(_subs)):
+            PANES[_label] = _pane
+
+TAB_LABELS = list(PANES)
+# Published for ci/apptest_check.py, which asserts on the pane set rather
+# than a flat tab count — the count changes whenever a pane moves section.
+st.session_state["pane_labels"] = TAB_LABELS
+st.session_state["section_count"] = len(SECTIONS)
 
 # Reset per script run. Every tab body re-executes on each rerun, so a failure
 # carried over from a previous run would be reported long after it was fixed.
@@ -502,15 +526,15 @@ st.session_state["tab_failures"] = {}
 
 
 @contextmanager
-def tab_guard(index: int):
+def tab_guard(label: str):
     """
-    Render one tab, containing any failure inside it.
+    Render one pane, containing any failure inside it.
 
-    ``st.tabs`` is not lazy: every tab body executes top to bottom in a single
-    script run, so an uncaught exception in an early tab aborts the run and
-    every later tab renders empty. A missing multiple in Peers could therefore
-    take out Backtesting through Report — eight panels with nothing wrong with
-    them. Catching per tab turns a total outage into one degraded panel.
+    ``st.tabs`` is not lazy: every pane body executes top to bottom in a single
+    script run, so an uncaught exception in an early one aborts the run and
+    every later pane renders empty. A missing multiple in Peers could therefore
+    take out eight panels with nothing wrong with them. Catching per pane turns
+    a total outage into one degraded panel.
 
     The traceback is shown rather than swallowed. Streamlit redacts uncaught
     exceptions in deployment ("original error message is redacted"), which is
@@ -518,18 +542,18 @@ def tab_guard(index: int):
     operator debugging blind; this app renders only public market data, and the
     detail sits behind a collapsed expander.
     """
-    with tabs[index]:
+    with PANES[label]:
         try:
             yield
         except _ScriptControl:
             raise                       # st.stop()/st.rerun() are control flow
         except Exception as exc:
             failed = st.session_state.setdefault("tab_failures", {})
-            failed[TAB_LABELS[index]] = f"{type(exc).__name__}: {exc}"
+            failed[label] = f"{type(exc).__name__}: {exc}"
             st.error(
-                f"**{TAB_LABELS[index]} could not be rendered.** "
+                f"**{label} could not be rendered.** "
                 f"{type(exc).__name__}: {exc}\n\n"
-                "The other tabs are unaffected — this panel alone failed."
+                "The other panels are unaffected — this one alone failed."
             )
             with st.expander("Technical detail"):
                 st.code("".join(traceback.format_exception(exc)), language="text")
@@ -538,7 +562,7 @@ def tab_guard(index: int):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — CHARTS (TradingView + native candles + measured indicator accuracy)
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(0):
+with tab_guard("Charts"):
     c1, c2, c3 = st.columns([1.4, 1, 1])
     with c1:
         tv_interval = st.radio(
@@ -710,7 +734,7 @@ with tab_guard(0):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — VALUATION
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(1):
+with tab_guard("Valuation"):
     _missing = raw.get("missing_fields") or []
     if _missing:
         st.info(
@@ -787,7 +811,7 @@ with tab_guard(1):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — EXPLAINABILITY (SHAP / LIME)
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(2):
+with tab_guard("Explainability"):
     _attr_method = "SHAP" if attribution.source == "shap" else "XGBoost contributions"
     st.markdown(
         theme.section(f"Feature attribution — {_attr_method}", "Explainability"),
@@ -843,7 +867,7 @@ with tab_guard(2):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — DCF & SCENARIO
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(3):
+with tab_guard("DCF & Scenario"):
     st.markdown(theme.section("Interactive DCF", "Discounted cash flow"), unsafe_allow_html=True)
     st.caption("Adjust the assumptions; the DCF and its Monte-Carlo distribution update live.")
 
@@ -969,7 +993,7 @@ with tab_guard(3):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — PEERS
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(4):
+with tab_guard("Peers"):
     st.markdown(theme.section("Peer group benchmarking", "Peers"), unsafe_allow_html=True)
     self_metrics = {
         "name": raw.get("name", tk),
@@ -1050,7 +1074,7 @@ with tab_guard(4):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 5 — BACKTESTING
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(5):
+with tab_guard("Backtesting"):
     st.markdown(theme.section("Historical backtesting", "Validation"), unsafe_allow_html=True)
     st.caption(
         "How the valuation signal would have performed against actual price moves over "
@@ -1092,7 +1116,7 @@ with tab_guard(5):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 6 — EXECUTION & TIMING (regime + technical filters + sizing/risk floors)
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(6):
+with tab_guard("Execution & Timing"):
     st.markdown(theme.section("Macro regime", "Regime"), unsafe_allow_html=True)
     rc1, rc2, rc3, rc4 = st.columns(4)
     rc1.metric("Regime", regime.regime, help=f"Detected via {regime.source.upper()}")
@@ -1170,7 +1194,7 @@ with tab_guard(6):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 7 — GUARDRAILS (quality/distress scores + insider/short)
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(7):
+with tab_guard("Guardrails"):
     st.markdown(theme.section("Value-trap &amp; distress screens", "Guardrails"), unsafe_allow_html=True)
     st.caption("Forensic-accounting scores prevent the model from rating structurally "
                "broken companies as bargains.")
@@ -1293,7 +1317,7 @@ with tab_guard(7):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 8 — SCREENER (quantile ranking + relative return)
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(8):
+with tab_guard("Screener"):
     st.markdown(theme.section("Cross-sectional screener", "Screener"), unsafe_allow_html=True)
     st.caption("Rank a universe by margin-of-safety (p50 vs price) and expected excess "
                "return; buys are flagged only in the top decile.")
@@ -1337,7 +1361,7 @@ with tab_guard(8):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 9 — FILINGS Δ (10-K/10-Q textual divergence)
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(9):
+with tab_guard("Fundamental Δ"):
     st.markdown(theme.section("Fundamental-delta NLP", "Filings"), unsafe_allow_html=True)
     st.caption("Cosine-similarity divergence between consecutive SEC filings flags rapid "
                "changes in risk-factor disclosures before the market digests them.")
@@ -1384,7 +1408,7 @@ with tab_guard(9):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 11 — FILINGS RAG (retrieval-augmented Q&A over 10-K / 10-Q text)
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(10):
+with tab_guard("Ask the Filings"):
     st.markdown(theme.section("Ask the filings", "Filings"), unsafe_allow_html=True)
     st.caption(
         "Retrieval-augmented Q&A over this company's SEC filings. Text is pulled from "
@@ -1508,7 +1532,7 @@ with tab_guard(10):
                 )
 
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(11):
+with tab_guard("Options & Futures"):
     st.markdown(theme.section("Live option chain", "Derivatives"), unsafe_allow_html=True)
     st.caption(
         "Strikes, bid/ask, open interest and implied volatility pulled from "
@@ -1866,7 +1890,7 @@ with tab_guard(11):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 11 — REPORT
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(12):
+with tab_guard("Report"):
     st.markdown(theme.section("Equity research report", "Report"), unsafe_allow_html=True)
     st.caption(
         "Generate a formatted PDF covering every tab: valuation range and signal, "
@@ -2008,7 +2032,7 @@ with tab_guard(12):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 14 — TRACK RECORD
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(13):
+with tab_guard("Track Record"):
     st.markdown(theme.section("Your saved valuations", "Track record"), unsafe_allow_html=True)
     st.caption(
         "Every analysis you run is stored with its p10–p90 band and the price at "
@@ -2096,7 +2120,7 @@ with tab_guard(13):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 15 — WATCHLIST
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_guard(14):
+with tab_guard("Watchlist"):
     _key = st.session_state.get("ledger_key", "")
     _list = watch_mod.get(_key)
 
