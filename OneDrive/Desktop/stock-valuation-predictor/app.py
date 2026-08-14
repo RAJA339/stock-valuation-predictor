@@ -32,7 +32,9 @@ gracefully, so the app runs even without network access or optional libraries.
 
 from __future__ import annotations
 
+import traceback
 import warnings
+from contextlib import contextmanager
 
 warnings.filterwarnings("ignore")
 
@@ -43,6 +45,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+# st.stop() and st.rerun() raise to unwind the script. On current Streamlit they
+# derive from BaseException and so pass through `except Exception` untouched,
+# but that has not always been true, and tab_guard() must never swallow them.
+# The empty tuple is a never-matching except clause if the import path moves.
+try:
+    from streamlit.runtime.scriptrunner_utils.exceptions import (
+        ScriptControlException as _ScriptControl,
+    )
+except Exception:                                   # pragma: no cover
+    _ScriptControl = ()
 
 from svp import theme
 from svp.features import build_features, FEATURE_LABELS
@@ -400,10 +413,55 @@ tabs = st.tabs([
     "📄 Report",
 ])
 
+TAB_LABELS = [
+    "Charts", "Valuation", "Explainability", "DCF & Scenario", "Peers",
+    "Backtesting", "Execution & Timing", "Guardrails", "Screener",
+    "Filings Δ", "Filings RAG", "Options & Futures", "Report",
+]
+
+# Reset per script run. Every tab body re-executes on each rerun, so a failure
+# carried over from a previous run would be reported long after it was fixed.
+st.session_state["tab_failures"] = {}
+
+
+@contextmanager
+def tab_guard(index: int):
+    """
+    Render one tab, containing any failure inside it.
+
+    ``st.tabs`` is not lazy: every tab body executes top to bottom in a single
+    script run, so an uncaught exception in an early tab aborts the run and
+    every later tab renders empty. A missing multiple in Peers could therefore
+    take out Backtesting through Report — eight panels with nothing wrong with
+    them. Catching per tab turns a total outage into one degraded panel.
+
+    The traceback is shown rather than swallowed. Streamlit redacts uncaught
+    exceptions in deployment ("original error message is redacted"), which is
+    the right default for an app handling third-party data but leaves the
+    operator debugging blind; this app renders only public market data, and the
+    detail sits behind a collapsed expander.
+    """
+    with tabs[index]:
+        try:
+            yield
+        except _ScriptControl:
+            raise                       # st.stop()/st.rerun() are control flow
+        except Exception as exc:
+            failed = st.session_state.setdefault("tab_failures", {})
+            failed[TAB_LABELS[index]] = f"{type(exc).__name__}: {exc}"
+            st.error(
+                f"**{TAB_LABELS[index]} could not be rendered.** "
+                f"{type(exc).__name__}: {exc}\n\n"
+                "The other tabs are unaffected — this panel alone failed."
+            )
+            with st.expander("Technical detail"):
+                st.code("".join(traceback.format_exception(exc)), language="text")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — CHARTS (TradingView + native candles + measured indicator accuracy)
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[0]:
+with tab_guard(0):
     c1, c2, c3 = st.columns([1.4, 1, 1])
     with c1:
         tv_interval = st.radio(
@@ -575,7 +633,7 @@ with tabs[0]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — VALUATION
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[1]:
+with tab_guard(1):
     _missing = raw.get("missing_fields") or []
     if _missing:
         st.info(
@@ -652,7 +710,7 @@ with tabs[1]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — EXPLAINABILITY (SHAP / LIME)
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[2]:
+with tab_guard(2):
     st.markdown(
         f'<div class="section-header">🔍 Feature Attribution '
         f'({"SHAP" if attribution.source == "shap" else "XGBoost contributions"})</div>',
@@ -708,7 +766,7 @@ with tabs[2]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — DCF & SCENARIO
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[3]:
+with tab_guard(3):
     st.markdown('<div class="section-header">🧮 Discounted Cash Flow — Interactive</div>', unsafe_allow_html=True)
     st.caption("Adjust the assumptions; the DCF and its Monte-Carlo distribution update live.")
 
@@ -773,7 +831,7 @@ with tabs[3]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — PEERS
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[4]:
+with tab_guard(4):
     st.markdown('<div class="section-header">🏦 Peer Group Benchmarking</div>', unsafe_allow_html=True)
     self_metrics = {
         "name": raw.get("name", tk),
@@ -854,7 +912,7 @@ with tabs[4]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 5 — BACKTESTING
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[5]:
+with tab_guard(5):
     st.markdown('<div class="section-header">📉 Historical Backtesting Engine</div>', unsafe_allow_html=True)
     st.caption(
         "How the valuation signal would have performed against actual price moves over "
@@ -896,7 +954,7 @@ with tabs[5]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 6 — EXECUTION & TIMING (regime + technical filters + sizing/risk floors)
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[6]:
+with tab_guard(6):
     st.markdown('<div class="section-header">🌐 Macro Regime</div>', unsafe_allow_html=True)
     rc1, rc2, rc3, rc4 = st.columns(4)
     rc1.metric("Regime", regime.regime, help=f"Detected via {regime.source.upper()}")
@@ -974,7 +1032,7 @@ with tabs[6]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 7 — GUARDRAILS (quality/distress scores + insider/short)
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[7]:
+with tab_guard(7):
     st.markdown('<div class="section-header">🛡️ Value-Trap & Distress Guardrails</div>', unsafe_allow_html=True)
     st.caption("Forensic-accounting scores prevent the model from rating structurally "
                "broken companies as bargains.")
@@ -1037,7 +1095,7 @@ with tabs[7]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 8 — SCREENER (quantile ranking + relative return)
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[8]:
+with tab_guard(8):
     st.markdown('<div class="section-header">🔬 Cross-Sectional Screener</div>', unsafe_allow_html=True)
     st.caption("Rank a universe by margin-of-safety (p50 vs price) and expected excess "
                "return; buys are flagged only in the top decile.")
@@ -1081,7 +1139,7 @@ with tabs[8]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 9 — FILINGS Δ (10-K/10-Q textual divergence)
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[9]:
+with tab_guard(9):
     st.markdown('<div class="section-header">📰 Fundamental-Delta NLP</div>', unsafe_allow_html=True)
     st.caption("Cosine-similarity divergence between consecutive SEC filings flags rapid "
                "changes in risk-factor disclosures before the market digests them.")
@@ -1128,7 +1186,7 @@ with tabs[9]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 11 — FILINGS RAG (retrieval-augmented Q&A over 10-K / 10-Q text)
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[10]:
+with tab_guard(10):
     st.markdown('<div class="section-header">🔎 Ask the Filings</div>', unsafe_allow_html=True)
     st.caption(
         "Retrieval-augmented Q&A over this company's SEC filings. Text is pulled from "
@@ -1252,7 +1310,7 @@ with tabs[10]:
                 )
 
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[11]:
+with tab_guard(11):
     st.markdown('<div class="section-header">⚡ Live Option Chain</div>', unsafe_allow_html=True)
     st.caption(
         "Strikes, bid/ask, open interest and implied volatility pulled from "
@@ -1610,7 +1668,7 @@ with tabs[11]:
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 11 — REPORT
 # ══════════════════════════════════════════════════════════════════════════════
-with tabs[12]:
+with tab_guard(12):
     st.markdown('<div class="section-header">📄 One-Click Equity Research Report</div>', unsafe_allow_html=True)
     st.caption(
         "Generate a formatted PDF covering every tab: valuation range and signal, "
@@ -1643,6 +1701,17 @@ with tabs[12]:
         pending.append("Options & futures (open the ⚡ Options & Futures tab once)")
     if pending:
         st.info("Not yet computed, so these will be skipped: " + "; ".join(pending))
+
+    # A tab that raised contributed nothing to session_state, so the report
+    # would quietly omit its section. Say so — an incomplete research note that
+    # does not announce the gap is worse than one that does.
+    _failed = st.session_state.get("tab_failures") or {}
+    if _failed:
+        st.warning(
+            "These tabs failed to render, so their sections will be missing or "
+            "fall back to defaults: "
+            + "; ".join(f"**{k}** ({v})" for k, v in _failed.items())
+        )
 
     _rep_iv = st.session_state.get("chart_interval", "15m")
     _rep_hz = int(st.session_state.get("chart_horizon", 6))

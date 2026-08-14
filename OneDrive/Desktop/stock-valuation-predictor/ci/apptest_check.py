@@ -69,10 +69,16 @@ def build_seed_analysis():
     }
 
 
-def main():
+def _run(seed):
     at = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
-    at.session_state["analysis"] = build_seed_analysis()
+    at.session_state["analysis"] = seed
     at.run()
+    return at
+
+
+def check_healthy(seed):
+    """Baseline: the whole app renders cleanly."""
+    at = _run(seed)
 
     if at.exception:
         print("APPTEST FAILED — uncaught exceptions:")
@@ -92,7 +98,61 @@ def main():
     if at.error:
         print("APPTEST FAILED — app emitted st.error output")
         sys.exit(1)
+    return n_metrics
 
+
+def check_tab_isolation(seed, baseline_metrics):
+    """
+    A failure in one tab must not take down the others.
+
+    st.tabs is not lazy — every body runs in a single pass — so before
+    tab_guard() an exception in Peers (tab 4) aborted the script and left
+    Backtesting through Report blank. This drives that exact case: Peers is
+    forced to raise, and the rest of the app must still come up.
+    """
+    from svp.analytics import peers as P
+
+    original = P.benchmark
+
+    def _boom(*a, **k):
+        raise ValueError("synthetic peer-feed failure")
+
+    P.benchmark = _boom
+    try:
+        at = _run(seed)
+    finally:
+        P.benchmark = original
+
+    if at.exception:
+        print("APPTEST FAILED — a failing tab escaped tab_guard():")
+        for e in at.exception:
+            print(" ", repr(e)[:300])
+        sys.exit(1)
+
+    failures = at.session_state["tab_failures"]
+    print(f"isolation: tabs={len(at.tabs)} metrics={len(at.metric)} failed={failures}")
+
+    if list(failures) != ["Peers"]:
+        print(f"APPTEST FAILED — expected only Peers to fail, got {list(failures)}")
+        sys.exit(1)
+    if len(at.tabs) != EXPECTED_TABS:
+        print(f"APPTEST FAILED — expected {EXPECTED_TABS} tabs, got {len(at.tabs)}")
+        sys.exit(1)
+    # Peers renders its cards as HTML, not st.metric, so a contained failure
+    # there should cost no metrics at all. Downstream tabs must be untouched.
+    if len(at.metric) != baseline_metrics:
+        print(f"APPTEST FAILED — {baseline_metrics - len(at.metric)} metrics lost "
+              "downstream of the failing tab; isolation is leaking")
+        sys.exit(1)
+    if len(at.error) != 1:
+        print(f"APPTEST FAILED — expected exactly 1 scoped error, got {len(at.error)}")
+        sys.exit(1)
+
+
+def main():
+    seed = build_seed_analysis()
+    baseline_metrics = check_healthy(seed)
+    check_tab_isolation(seed, baseline_metrics)
     print("APPTEST PASSED")
 
 
