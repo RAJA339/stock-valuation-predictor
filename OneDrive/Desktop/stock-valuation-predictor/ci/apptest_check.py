@@ -26,7 +26,7 @@ from svp.analytics import technical as TA
 from svp.data import market as market_mod, macro as macro_mod
 from svp.features import FEATURE_COLUMNS
 
-EXPECTED_TABS = 13
+EXPECTED_TABS = 14
 
 
 def build_seed_analysis():
@@ -149,10 +149,59 @@ def check_tab_isolation(seed, baseline_metrics):
         sys.exit(1)
 
 
+def check_ledger_populated(seed):
+    """
+    The Track Record tab with rows in it.
+
+    The default AppTest seeds session_state directly, so no prediction is ever
+    written and the tab only ever renders its empty state — which is the half
+    that cannot break. This seeds a matured ledger and asserts the table, the
+    calibration figures and the verdict all render.
+    """
+    import time
+
+    from svp.data import predictions as P
+
+    key = P.new_key()
+    for tkr in ("NVDA", "AAPL", "MSFT"):
+        P.record(key, tkr, 100.0, 90.0, 110.0, 130.0, "Undervalued", dedupe_hours=0)
+    # Backdate so the rows count as matured and are actually scored.
+    conn = P._sq()
+    conn.execute("UPDATE svp_predictions SET created_at = ? WHERE ledger_key = ?",
+                 (time.time() - 200 * 86400, key))
+    conn.commit()
+
+    at = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+    at.session_state["analysis"] = seed
+    at.session_state["ledger_key"] = key
+    at.run()
+
+    if at.exception:
+        print("APPTEST FAILED — populated ledger raised:")
+        for e in at.exception:
+            print(" ", repr(e)[:300])
+        sys.exit(1)
+
+    failures = at.session_state["tab_failures"]
+    if failures:
+        print(f"APPTEST FAILED — tabs failed with a populated ledger: {failures}")
+        sys.exit(1)
+    if not at.dataframe:
+        print("APPTEST FAILED — ledger table did not render")
+        sys.exit(1)
+
+    text = " ".join(str(m.value) for m in at.markdown)
+    if not any(w in text for w in ("well-calibrated", "Not enough", "confident")):
+        print("APPTEST FAILED — no calibration verdict rendered")
+        sys.exit(1)
+    print(f"ledger: rows={len(P.for_key(key))} dataframes={len(at.dataframe)}")
+
+
 def main():
     seed = build_seed_analysis()
     baseline_metrics = check_healthy(seed)
     check_tab_isolation(seed, baseline_metrics)
+    check_ledger_populated(seed)
     print("APPTEST PASSED")
 
 
