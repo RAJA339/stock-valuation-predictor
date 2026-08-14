@@ -158,7 +158,7 @@ def list_filings(ticker: str, forms=("10-K", "10-Q"), limit: int = 6) -> list[Fi
     if data is None:
         try:
             r = requests.get(_SUBMISSIONS_URL.format(cik=cik),
-                             headers={**sec._HEADERS, "Host": "data.sec.gov"}, timeout=20)
+                             headers=sec._HEADERS, timeout=20)
             r.raise_for_status()
             data = r.json()
             storage.cache_set(key, data, ttl=6 * 3600)

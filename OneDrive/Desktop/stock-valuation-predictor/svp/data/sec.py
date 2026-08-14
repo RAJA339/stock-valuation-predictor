@@ -19,10 +19,16 @@ from . import storage
 
 # SEC requires a descriptive User-Agent with contact info; generic agents get
 # 403-ed. See https://www.sec.gov/os/webmaster-faq#developers
+# No Host header here on purpose. requests derives Host from the URL, and this
+# package talks to two SEC hosts: www.sec.gov for the ticker map and the
+# Archives, data.sec.gov for the XBRL and submissions APIs. Pinning
+# Host: www.sec.gov sent a mismatched header to data.sec.gov on every
+# companyfacts request — the endpoint behind every valuation — which the CDN
+# may reject. The failure then surfaced as "could not parse usable
+# fundamentals", blaming the filing for a request we had malformed.
 _HEADERS = {
     "User-Agent": "StockValuationPredictor/1.0 (educational; contact@example.com)",
     "Accept-Encoding": "gzip, deflate",
-    "Host": "www.sec.gov",
 }
 
 # Concept-name variants. Filers tag the same line item differently — notably
@@ -132,20 +138,63 @@ def get_cik(ticker: str) -> Optional[str]:
     return None
 
 
+# Why the last companyfacts fetch produced nothing, keyed by CIK. An empty dict
+# has three quite different causes — the request failed, the company has no
+# XBRL facts, or the response was not JSON — and telling the user the wrong one
+# sends them to check the wrong thing.
+_LAST_FETCH_ERROR: dict[str, str] = {}
+
+
+def last_fetch_error(cik: str) -> Optional[str]:
+    """The reason :func:`get_financials` last returned nothing for this CIK."""
+    return _LAST_FETCH_ERROR.get(cik)
+
+
 def get_financials(cik: str) -> dict:
-    """Fetch (and persist) company facts JSON for a CIK."""
+    """
+    Fetch (and persist) company facts JSON for a CIK.
+
+    Returns ``{}`` on any failure, recording the reason for
+    :func:`last_fetch_error` so callers can distinguish a transport problem
+    from a company that genuinely publishes no XBRL.
+    """
     key = f"secfacts:{cik}"
     cached = storage.cache_get(key)
     if cached is not None:
+        _LAST_FETCH_ERROR.pop(cik, None)
         return cached
+
     try:
-        payload = requests.get(_FACTS_URL.format(cik=cik), headers=_HEADERS, timeout=20).json()
-    except Exception:
+        resp = requests.get(_FACTS_URL.format(cik=cik), headers=_HEADERS, timeout=20)
+    except Exception as exc:
+        _LAST_FETCH_ERROR[cik] = f"network error contacting SEC ({type(exc).__name__})"
         return {}
-    if payload and "facts" in payload:
-        # Persist for a day — filings change quarterly at most.
-        storage.cache_set(key, payload, ttl=24 * 3600)
-    return payload or {}
+
+    if resp.status_code == 404:
+        _LAST_FETCH_ERROR[cik] = "the SEC publishes no XBRL company facts for this CIK"
+        return {}
+    if resp.status_code == 429:
+        _LAST_FETCH_ERROR[cik] = "SEC EDGAR is rate-limiting this deployment"
+        return {}
+    if resp.status_code >= 400:
+        _LAST_FETCH_ERROR[cik] = f"SEC EDGAR returned HTTP {resp.status_code}"
+        return {}
+
+    try:
+        payload = resp.json()
+    except Exception:
+        # A non-JSON body with a 200 is usually an edge/CDN interstitial.
+        _LAST_FETCH_ERROR[cik] = "SEC EDGAR returned a non-JSON response"
+        return {}
+
+    if not payload or "facts" not in payload:
+        _LAST_FETCH_ERROR[cik] = "the SEC response carried no XBRL facts"
+        return {}
+
+    # Persist for a day — filings change quarterly at most.
+    storage.cache_set(key, payload, ttl=24 * 3600)
+    _LAST_FETCH_ERROR.pop(cik, None)
+    return payload
 
 
 def _entries(facts: dict, concept: str, unit: str = "USD") -> list:

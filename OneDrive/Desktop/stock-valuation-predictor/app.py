@@ -383,14 +383,31 @@ if run_btn or _auto_run:
                     "are written BRK-B on EDGAR rather than BRK.B (both are accepted here)."
                 )
             else:
-                st.error(
-                    f"❌ Found **{ticker}** (CIK {_cik}) at the SEC, but could not parse "
-                    "usable fundamentals from its filings.\n\n"
-                    "Most often this is a company that has filed with the SEC but has not "
-                    "yet published XBRL financial facts — a recent IPO, a shell or a trust. "
-                    "It can also mean SEC EDGAR is rate-limiting or unreachable right now, "
-                    "in which case the same ticker will work shortly."
-                )
+                # Say what actually happened. The old message asserted the
+                # filings were unparseable even when the request had failed —
+                # which sent the reader to check the company instead of the
+                # feed, and was wrong for any well-established filer.
+                _why = sec_mod.last_fetch_error(_cik)
+                if _why:
+                    st.error(
+                        f"❌ Found **{ticker}** (CIK {_cik}) at the SEC, but could not "
+                        f"retrieve its financial data: {_why}.\n\n"
+                        + ("Try again in a few minutes — this is a transient "
+                           "condition on the SEC side, not a problem with this "
+                           "company's filings."
+                           if "rate-limit" in _why or "network" in _why or "HTTP" in _why
+                           else "This affects companies that file with the SEC without "
+                                "publishing XBRL financial facts — recent IPOs, shells "
+                                "and some trusts.")
+                    )
+                else:
+                    st.error(
+                        f"❌ Found **{ticker}** (CIK {_cik}) at the SEC and retrieved its "
+                        "XBRL facts, but none of revenue, net income or total assets "
+                        "could be located under any tag this app recognises.\n\n"
+                        "That is a gap in the tag list here rather than in the filing. "
+                        "Please report the ticker so the mapping can be extended."
+                    )
         else:
             st.session_state["analysis"] = analysis
             st.session_state["last_ticker"] = ticker
