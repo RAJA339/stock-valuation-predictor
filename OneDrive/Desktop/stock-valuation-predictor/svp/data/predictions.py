@@ -349,6 +349,102 @@ def calibration(outcomes: Sequence[Outcome], target: float = 0.80,
     )
 
 
+def all_predictions(limit: int = 50_000) -> list[Prediction]:
+    """
+    Every prediction across every ledger key, newest first.
+
+    This is the raw material for the cross-user track record. It exposes only
+    the predictions themselves — never which key made them — and the callers
+    above it emit nothing but counts and rates, so no individual's history is
+    reconstructable from the aggregate.
+    """
+    with _lock:
+        conn = _pg()
+        if conn is not None:
+            try:
+                with conn, conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT {_COLS} FROM svp_predictions "
+                        "ORDER BY created_at DESC LIMIT %s", (limit,),
+                    )
+                    return [_row_to_prediction(r) for r in cur.fetchall()]
+            except Exception:
+                pass
+        try:
+            cur = _sq().execute(
+                f"SELECT {_COLS} FROM svp_predictions "
+                "ORDER BY created_at DESC LIMIT ?", (limit,),
+            )
+            return [_row_to_prediction(r) for r in cur.fetchall()]
+        except Exception:
+            return []
+
+
+def _signal_bucket(signal: Optional[str]) -> str:
+    """
+    Collapse a stored signal string to one of three directional cohorts.
+
+    The signal text has varied across versions ("Undervalued", "Strong Buy",
+    "Below intrinsic"...), so cohorts key on direction words rather than exact
+    strings. Anything unrecognised lands in "Other" rather than being dropped.
+    """
+    s = (signal or "").lower()
+    if any(w in s for w in ("under", "buy", "cheap", "below")):
+        return "Undervalued calls"
+    if any(w in s for w in ("over", "sell", "rich", "above", "expensive")):
+        return "Overvalued calls"
+    if any(w in s for w in ("hold", "fair", "neutral")):
+        return "Fair-value calls"
+    return "Other calls"
+
+
+def _collapse_to_independent(outcomes: Sequence[Outcome]) -> list[Outcome]:
+    """
+    Reduce correlated duplicates to one observation apiece.
+
+    The same underlying bet — say NVDA valued near $142 on 3 March — may be
+    logged by many users on the same day, because the model is near-deterministic
+    given a day's data. Those are not independent draws; counting them all would
+    shrink the Wilson interval to a false confidence, which is the exact failure
+    this project exists to avoid. One prediction per (ticker, calendar day, rough
+    price level) is kept, so the cohort statistic counts distinct bets, not
+    distinct users making the same bet.
+    """
+    seen: dict[tuple, Outcome] = {}
+    for o in outcomes:
+        p = o.prediction
+        day = int(p.created_at // 86400)
+        # Bucket the level so trivially different bands still collapse; two
+        # digits of relative precision is enough to catch "the same call".
+        level = round(p.p50, -int(len(str(int(abs(p.p50) or 1))) - 2)) if p.p50 else 0
+        key = (p.ticker, day, level)
+        if key not in seen:
+            seen[key] = o
+    return list(seen.values())
+
+
+def global_calibration(outcomes: Sequence[Outcome], target: float = 0.80,
+                       mature_only: bool = True) -> dict:
+    """
+    The model's track record across everyone, split by directional cohort.
+
+    Returns ``{"All": Calibration, "Undervalued calls": Calibration, ...}`` —
+    each computed on the independent-observation set, so a cohort's sample size
+    is the number of distinct bets, not the number of users who made them. This
+    is the number a brokerage structurally cannot publish: whether its own calls,
+    of a given kind, actually landed.
+    """
+    independent = _collapse_to_independent(outcomes)
+
+    buckets: dict[str, list] = {"All": []}
+    for o in independent:
+        buckets["All"].append(o)
+        buckets.setdefault(_signal_bucket(o.prediction.signal), []).append(o)
+
+    return {name: calibration(obs, target=target, mature_only=mature_only)
+            for name, obs in buckets.items()}
+
+
 def stats() -> dict:
     """Row counts, for the sidebar."""
     with _lock:

@@ -130,6 +130,24 @@ def get_backtest_cached(ticker: str, fallback_price: float, threshold: float = 0
     return bt_mod.run_backtest(hist), bt_mod.equity_curve(hist, threshold=threshold)
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_global_calibration():
+    """
+    The model's cross-user track record, scored and cached for 30 minutes.
+
+    Runs across every prediction in the ledger, not just this visitor's, so the
+    number strengthens as the whole user base uses the app — the compounding
+    credibility a brokerage cannot reproduce. Cached because it fetches a current
+    price per distinct ticker; the 30-minute TTL keeps that off the hot path
+    while staying fresh enough for a figure that moves over weeks.
+    """
+    preds = pred_mod.all_predictions()
+    if not preds:
+        return {}
+    scored = pred_mod.score(preds, lambda t: get_market_cached(t, 0.0).price)
+    return pred_mod.global_calibration(scored)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_facts_cached(cik: str):
     return sec_mod.get_financials(cik) if cik else {}
@@ -489,6 +507,32 @@ st.markdown(
     theme.verdict_bar(price, result.low, result.point, result.high),
     unsafe_allow_html=True,
 )
+
+# ── Live track record for calls like this one ────────────────────────────────
+# The single thing a brokerage will never show: how the model's own calls of
+# this kind have actually resolved, across everyone. Only shown once a cohort
+# has enough independent bets to say something honest.
+try:
+    _gcal = get_global_calibration()
+except Exception:
+    _gcal = {}
+_cohort_name = pred_mod._signal_bucket(signal_text)
+_cohort = _gcal.get(_cohort_name)
+if _cohort is not None and _cohort.n >= 10:
+    _reads_calibrated = _cohort.ci_low <= _cohort.target <= _cohort.ci_high
+    _cls = "verdict-inside" if _reads_calibrated else "verdict-over"
+    st.markdown(
+        f'<div class="verdict"><div class="verdict-line">'
+        f'<span class="section-eyebrow">Track record · {_cohort_name}</span><br>'
+        f'Across every user, the model\'s <b>{_cohort_name.lower()}</b> landed '
+        f'inside their p10–p90 band <span class="{_cls}">'
+        f'{_cohort.coverage*100:.0f}%</span> of the time '
+        f'<span class="verdict-tail">(95% CI {_cohort.ci_low*100:.0f}–'
+        f'{_cohort.ci_high*100:.0f}%, {_cohort.n} independent resolved bets; '
+        f'target {_cohort.target*100:.0f}%). Direction was right '
+        f'{_cohort.hit_rate*100:.0f}% of the time.</span>'
+        f'</div></div>', unsafe_allow_html=True,
+    )
 
 # ── Headline metric row ───────────────────────────────────────────────────────
 h1, h2, h3, h4 = st.columns(4)
@@ -2143,6 +2187,60 @@ with tab_guard("Track Record"):
                 "**This record is not durable.** " + _userdb.durability_note()
                 + " Until then, treat anything here as provisional."
             )
+
+    # ── Cross-user calibration ───────────────────────────────────────────────
+    # The compounding moat: the model's honesty score across every user, not
+    # just this one. A brokerage cannot publish this, because it would mean
+    # publishing whether its own calls were right.
+    st.markdown(theme.section("The model's record across everyone", "Calibration"),
+                unsafe_allow_html=True)
+    st.caption(
+        "Every valuation ever run, scored the same way — did the outcome land "
+        "inside the p10–p90 band. Split by the kind of call, because the honest "
+        "question is not 'is the model good' but 'is it calibrated *when it says "
+        "undervalued*'. Correlated duplicates are collapsed first: fifty users "
+        "valuing the same name on the same day are one bet, not fifty, so the "
+        "sample counts distinct calls and the interval cannot be faked wide by "
+        "popularity."
+    )
+    try:
+        _global = get_global_calibration()
+    except Exception:
+        _global = {}
+
+    _all = _global.get("All")
+    if _all is None or _all.n < 1:
+        st.info(
+            "No resolved predictions across the user base yet. This table fills "
+            "in as valuations are run and mature past their "
+            f"{pred_mod.DEFAULT_HORIZON_DAYS}-day horizon — it is the one number "
+            "here that gets stronger the more the app is used."
+        )
+    else:
+        _order = ["All", "Undervalued calls", "Overvalued calls",
+                  "Fair-value calls", "Other calls"]
+        _crows = []
+        for _name in _order:
+            _c = _global.get(_name)
+            if _c is None or _c.n == 0:
+                continue
+            _crows.append({
+                "Cohort": _name,
+                "Resolved": _c.n,
+                "In band": f"{_c.coverage*100:.0f}%",
+                "95% CI": f"{_c.ci_low*100:.0f}–{_c.ci_high*100:.0f}%",
+                "Direction": f"{_c.hit_rate*100:.0f}%" if _c.n_directional else "—",
+                "Reads as": _c.verdict,
+            })
+        st.dataframe(pd.DataFrame(_crows), width="stretch", hide_index=True)
+        st.caption(
+            "Target coverage is 80% — that is what a p10–p90 band claims. A "
+            "cohort whose interval brackets 80% is honestly calibrated; well "
+            "above means the bands are too wide to be useful, well below means "
+            "the model is overconfident on that kind of call. Either way the "
+            "number is measured, not asserted — which is the whole difference "
+            "from a price target."
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

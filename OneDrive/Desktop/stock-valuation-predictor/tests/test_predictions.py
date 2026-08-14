@@ -209,3 +209,120 @@ def test_stats_reports_a_backend():
     s = P.stats()
     assert s["backend"] in {"SQLite", "PostgreSQL"}
     assert s["rows"] >= 0
+
+
+# ── Cross-user calibration ───────────────────────────────────────────────────
+class TestGlobalCalibration:
+    """
+    The cross-user track record. The property that carries it is statistical
+    independence: the same model call, logged by many users, is one bet, not
+    many. If the collapse fails, the Wilson interval shrinks with popularity
+    rather than with evidence — a confidence the data has not earned.
+    """
+
+    def _outcome(self, ticker, created_at, price_now, signal="Undervalued",
+                 p10=90.0, p50=110.0, p90=130.0, price_at=100.0):
+        p = P.Prediction(
+            id=f"{ticker}-{created_at}-{price_now}", ledger_key=P.new_key(),
+            ticker=ticker, created_at=created_at, price_at=price_at,
+            p10=p10, p50=p50, p90=p90, signal=signal,
+            horizon_days=P.DEFAULT_HORIZON_DAYS,
+        )
+        return P.Outcome(prediction=p, price_now=price_now)
+
+    def test_duplicate_bets_collapse_to_one_observation(self):
+        """Fifty users, same name, same day, same call → one independent bet."""
+        old = time.time() - 200 * 86400
+        outs = [self._outcome("NVDA", old, 120.0) for _ in range(50)]
+        g = P.global_calibration(outs)
+        assert g["All"].n == 1
+
+    def test_distinct_days_are_distinct_bets(self):
+        outs = [self._outcome("NVDA", time.time() - d * 86400, 120.0)
+                for d in (150, 160, 170, 180)]
+        assert P.global_calibration(outs)["All"].n == 4
+
+    def test_distinct_tickers_are_distinct_bets(self):
+        old = time.time() - 200 * 86400
+        outs = [self._outcome(t, old, 120.0) for t in ("NVDA", "AAPL", "MSFT")]
+        assert P.global_calibration(outs)["All"].n == 3
+
+    def test_popularity_cannot_narrow_the_interval(self):
+        """
+        The core guarantee. One bet logged 200 times must give the *same*
+        interval as one bet logged once — width comes from evidence, not users.
+        """
+        old = time.time() - 200 * 86400
+        one = P.global_calibration([self._outcome("NVDA", old, 120.0)])
+        many = P.global_calibration([self._outcome("NVDA", old, 120.0)
+                                     for _ in range(200)])
+        assert one["All"].ci_low == pytest.approx(many["All"].ci_low)
+        assert one["All"].ci_high == pytest.approx(many["All"].ci_high)
+
+    def test_cohorts_split_by_direction(self):
+        old = time.time() - 200 * 86400
+        outs = [
+            self._outcome("NVDA", old, 120.0, signal="Undervalued"),
+            self._outcome("XOM", old, 120.0, signal="Strong Sell"),
+            self._outcome("KO", old, 120.0, signal="Hold / fairly valued"),
+        ]
+        g = P.global_calibration(outs)
+        assert g["Undervalued calls"].n == 1
+        assert g["Overvalued calls"].n == 1
+        assert g["Fair-value calls"].n == 1
+
+    def test_all_cohort_is_the_union(self):
+        old = time.time() - 200 * 86400
+        outs = [
+            self._outcome("NVDA", old, 120.0, signal="Undervalued"),
+            self._outcome("XOM", old - 86400, 120.0, signal="Overvalued"),
+        ]
+        assert P.global_calibration(outs)["All"].n == 2
+
+    @pytest.mark.parametrize("signal,cohort", [
+        ("Undervalued", "Undervalued calls"),
+        ("Strong Buy", "Undervalued calls"),
+        ("Below intrinsic value", "Undervalued calls"),
+        ("Overvalued", "Overvalued calls"),
+        ("SELL", "Overvalued calls"),
+        ("Trading rich", "Overvalued calls"),
+        ("Hold", "Fair-value calls"),
+        ("Fairly valued", "Fair-value calls"),
+        ("", "Other calls"),
+        ("???", "Other calls"),
+    ])
+    def test_signal_bucketing(self, signal, cohort):
+        assert P._signal_bucket(signal) == cohort
+
+    def test_coverage_counts_in_band_correctly(self):
+        old = time.time() - 200 * 86400
+        # Three distinct in-band, one distinct out-of-band.
+        outs = [
+            self._outcome("A", old, 120.0),       # in
+            self._outcome("B", old, 115.0),       # in
+            self._outcome("C", old, 100.0),       # in
+            self._outcome("D", old, 200.0),       # out (>130)
+        ]
+        c = P.global_calibration(outs, mature_only=False)["All"]
+        assert c.n == 4 and c.n_inside == 3
+        assert c.coverage == pytest.approx(0.75)
+
+    def test_immature_excluded_by_default(self):
+        outs = [self._outcome("A", time.time() - 86400, 120.0)]   # 1 day old
+        assert P.global_calibration(outs)["All"].n == 0
+        assert P.global_calibration(outs, mature_only=False)["All"].n == 1
+
+    def test_missing_prices_are_not_scored(self):
+        old = time.time() - 200 * 86400
+        outs = [self._outcome("A", old, None)]
+        assert P.global_calibration(outs)["All"].n == 0
+
+    def test_empty_input(self):
+        assert P.global_calibration([])["All"].n == 0
+
+    def test_all_predictions_reads_across_keys(self):
+        k1, k2 = P.new_key(), P.new_key()
+        P.record(k1, "NVDA", 100.0, 90.0, 110.0, 130.0, dedupe_hours=0)
+        P.record(k2, "AAPL", 100.0, 90.0, 110.0, 130.0, dedupe_hours=0)
+        tickers = {p.ticker for p in P.all_predictions()}
+        assert {"NVDA", "AAPL"} <= tickers

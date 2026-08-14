@@ -263,12 +263,70 @@ def check_watchlist_populated(seed):
     print(f"watchlist: names={len(W.get(key))} dataframes={len(at.dataframe)}")
 
 
+def check_global_calibration(seed):
+    """
+    The cross-user cohort table and the live track-record readout.
+
+    Seeds distinct matured bets across many keys and tickers, then patches the
+    price lookup the scorer uses so every bet reads in-band — the network is not
+    reachable in CI. Asserts both the Track Record cohort section and the
+    under-verdict readout on the main analysis actually render, which the empty
+    state never exercises.
+    """
+    import streamlit as st
+
+    from svp.data import predictions as P
+
+    tickers = ["NVDA", "AAPL", "MSFT", "KO", "F", "GM", "AMD", "INTC",
+               "T", "VZ", "XOM", "CVX", "PG", "JNJ", "WMT"]
+    for t in tickers:
+        P.record(P.new_key(), t, 100.0, 90.0, 110.0, 130.0, "Undervalued",
+                 dedupe_hours=0)
+    conn = P._sq()
+    conn.execute("UPDATE svp_predictions SET created_at = created_at - ?",
+                 (200 * 86400,))
+    conn.commit()
+
+    # get_global_calibration is @st.cache_data; an earlier phase already scored
+    # an empty global set (real lookup, offline) and cached it. Clear so this
+    # phase recomputes against the seeded, patched data.
+    st.cache_data.clear()
+
+    original = P.score
+    P.score = lambda preds, lookup: original(preds, lambda t: 120.0)
+    try:
+        at = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+        at.session_state["analysis"] = seed
+        at.run()
+    finally:
+        P.score = original
+
+    if at.exception:
+        print("APPTEST FAILED — global calibration raised:")
+        for e in at.exception:
+            print(" ", repr(e)[:300])
+        sys.exit(1)
+    if at.session_state["tab_failures"]:
+        print(f"APPTEST FAILED — tabs failed: {at.session_state['tab_failures']}")
+        sys.exit(1)
+
+    text = " ".join(str(m.value) for m in at.markdown).lower()
+    if "record across everyone" not in text:
+        print("APPTEST FAILED — cross-user cohort section did not render")
+        sys.exit(1)
+    if "across every user" not in text:
+        print("APPTEST FAILED — live cohort readout did not render under the verdict")
+        sys.exit(1)
+    print("global calibration: cohort section and live readout rendered")
+
+
 def main():
     seed = build_seed_analysis()
     baseline_metrics = check_healthy(seed)
     check_tab_isolation(seed, baseline_metrics)
     check_ledger_populated(seed)
     check_watchlist_populated(seed)
+    check_global_calibration(seed)
     print("APPTEST PASSED")
 
 
