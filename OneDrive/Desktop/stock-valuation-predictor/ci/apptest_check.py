@@ -320,6 +320,52 @@ def check_global_calibration(seed):
     print("global calibration: cohort section and live readout rendered")
 
 
+def check_identity_persistence(seed):
+    """
+    The ledger identity is adopted from ?id= and survives a reload.
+
+    The bug this guards: a fresh anonymous key was minted on every load, so one
+    person's ledger silently split across keys whenever the page reloaded. The
+    key now rides in the URL. This asserts an incoming ?id= is adopted rather
+    than replaced, that junk in that slot falls back to a freshly minted valid
+    key rather than crashing, and that a no-id load writes a key back to the URL
+    so the next reload lands on the same identity.
+    """
+    from svp.data import predictions as P
+
+    known = P.new_key()
+    at = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+    at.query_params["id"] = known
+    at.session_state["analysis"] = seed
+    at.run()
+    if at.exception:
+        print("APPTEST FAILED — identity adoption raised:", repr(at.exception[0])[:200])
+        sys.exit(1)
+    if at.session_state["ledger_key"] != known:
+        print(f"APPTEST FAILED — ?id= not adopted: {at.session_state['ledger_key']}")
+        sys.exit(1)
+
+    at2 = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+    at2.query_params["id"] = "not-a-valid-key"
+    at2.session_state["analysis"] = seed
+    at2.run()
+    minted = at2.session_state["ledger_key"]
+    if not P.valid_key(minted) or minted == "not-a-valid-key":
+        print(f"APPTEST FAILED — junk ?id= not replaced with a valid key: {minted}")
+        sys.exit(1)
+
+    at3 = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+    at3.session_state["analysis"] = seed
+    at3.run()
+    # AppTest stores each query param as a list; unwrap before comparing.
+    written = at3.query_params.get("id")
+    written = written[0] if isinstance(written, list) else written
+    if written != at3.session_state["ledger_key"]:
+        print("APPTEST FAILED — a no-id load did not write the key back to the URL")
+        sys.exit(1)
+    print("identity: ?id= adopted, junk replaced, fresh key persisted to URL")
+
+
 def main():
     seed = build_seed_analysis()
     baseline_metrics = check_healthy(seed)
@@ -327,6 +373,7 @@ def main():
     check_ledger_populated(seed)
     check_watchlist_populated(seed)
     check_global_calibration(seed)
+    check_identity_persistence(seed)
     print("APPTEST PASSED")
 
 
