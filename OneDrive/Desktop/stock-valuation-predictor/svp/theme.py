@@ -85,6 +85,23 @@ CSS = f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
+    /* ── Type scale ─────────────────────────────────────────────────────────
+       Seven steps on a ~1.2 ratio, replacing the seventeen ad-hoc sizes this
+       sheet accumulated (.68 .70 .72 .78 .82 .84 .86 .92 .95 1.0 1.02 1.35 1.5
+       1.75 1.9 2.3rem). Sizes that sit a hair apart read as accidents; a fixed
+       ratio is most of what separates a designed interface from a styled one.
+       Every rule below sizes itself from this scale — add a step here rather
+       than a one-off value at a call site. */
+    :root {{
+        --fs-1: .70rem;    /* micro labels, eyebrows, pills   */
+        --fs-2: .82rem;    /* captions, sidebar body, buttons */
+        --fs-3: .95rem;    /* section heads, dense body       */
+        --fs-4: 1.15rem;   /* secondary values                */
+        --fs-5: 1.45rem;   /* signals, st.metric values       */
+        --fs-6: 1.80rem;   /* card values, ticker symbol      */
+        --fs-7: 2.30rem;   /* quote price                     */
+    }}
+
     html, body, .stApp, [class*="css"] {{
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }}
@@ -107,36 +124,93 @@ CSS = f"""
     }}
     .metric-card:hover {{ background: {PANEL_HI}; border-color: {OBSIDIAN_HI}; }}
     .metric-label {{
-        font-size: .70rem; color: {MUTED}; text-transform: uppercase;
+        font-size: var(--fs-1); color: {MUTED}; text-transform: uppercase;
         letter-spacing: .07em; font-weight: 600; margin-bottom: 6px;
     }}
-    .metric-value {{ font-size: 1.75rem; font-weight: 700; color: {TEXT}; line-height: 1.15; }}
-    .metric-sub   {{ font-size: 1.02rem; font-weight: 600; color: {TEXT}; line-height: 1.3; }}
+    .metric-value {{ font-size: var(--fs-6); font-weight: 700; color: {TEXT}; line-height: 1.15; }}
+    .metric-sub   {{ font-size: var(--fs-4); font-weight: 600; color: {TEXT}; line-height: 1.3; }}
 
     /* ── Directional text ───────────────────────────────────────────────── */
-    .signal-buy, .signal-under {{ color: {BULL}; font-size: 1.35rem; font-weight: 700; }}
-    .signal-over  {{ color: {BEAR}; font-size: 1.35rem; font-weight: 700; }}
-    .signal-hold  {{ color: {AMBER}; font-size: 1.35rem; font-weight: 700; }}
+    .signal-buy, .signal-under {{ color: {BULL}; font-size: var(--fs-5); font-weight: 700; }}
+    .signal-over  {{ color: {BEAR}; font-size: var(--fs-5); font-weight: 700; }}
+    .signal-hold  {{ color: {AMBER}; font-size: var(--fs-5); font-weight: 700; }}
 
     /* ── Delta pills — coloured strictly by sign ────────────────────────── */
     .delta-pos {{
         display: inline-block; padding: 3px 10px; border-radius: 999px;
         background: {BULL_DIM}; color: {BULL};
-        font-size: .78rem; font-weight: 700; margin-top: 6px;
+        font-size: var(--fs-2); font-weight: 700; margin-top: 6px;
     }}
     .delta-neg {{
         display: inline-block; padding: 3px 10px; border-radius: 999px;
         background: {BEAR_DIM}; color: {BEAR};
-        font-size: .78rem; font-weight: 700; margin-top: 6px;
+        font-size: var(--fs-2); font-weight: 700; margin-top: 6px;
     }}
     .metric-note {{
-        font-size: .68rem; color: {MUTED}; margin-top: 7px;
+        font-size: var(--fs-1); color: {MUTED}; margin-top: 7px;
         letter-spacing: .02em; line-height: 1.35;
     }}
 
-    /* ── Section headers ────────────────────────────────────────────────── */
+    /* ── Verdict bar — the above-the-fold answer ────────────────────────────
+       The market marker is champagne: this is the single "you are here"
+       element on the page, which is exactly what the 10% selection colour is
+       reserved for. The range track stays pearl so the accent has something
+       quiet to sit against. */
+    .verdict {{
+        background: {PANEL};
+        border: 1px solid {BORDER};
+        border-left: 3px solid {EMERALD};
+        border-radius: 10px;
+        padding: 14px 18px 16px;
+        margin: 4px 0 14px;
+    }}
+    .verdict-line {{ font-size: var(--fs-4); color: {TEXT}; line-height: 1.45; }}
+    .verdict-tail {{ color: {MUTED}; font-size: var(--fs-3); }}
+    .verdict-under  {{ color: {BULL}; font-weight: 700; }}
+    .verdict-over   {{ color: {BEAR}; font-weight: 700; }}
+    .verdict-inside {{ color: {AMBER}; font-weight: 700; }}
+    .verdict-track {{
+        position: relative; height: 6px; border-radius: 3px;
+        background: linear-gradient(90deg, {PEARL_FAINT}, {PEARL_MUTED}, {PEARL_FAINT});
+        margin: 14px 0 6px;
+    }}
+    .verdict-point {{
+        position: absolute; top: -3px; width: 2px; height: 12px;
+        background: {PEARL}; transform: translateX(-1px);
+    }}
+    .verdict-mark {{
+        position: absolute; top: -5px; width: 3px; height: 16px;
+        background: {CHAMPAGNE}; border-radius: 2px;
+        transform: translateX(-1.5px);
+        box-shadow: 0 0 0 3px {CHAMPAGNE_DIM};
+    }}
+    .verdict-scale {{
+        display: flex; justify-content: space-between;
+        font-size: var(--fs-1); color: {MUTED};
+        font-variant-numeric: tabular-nums; letter-spacing: .03em;
+    }}
+
+    /* ── Section headers ─────────────────────────────────────────────────────
+       An eyebrow names the section's role, the title names the section, a rule
+       separates it from the content. No terminal a professional uses puts a
+       pictograph in a heading — hierarchy comes from size, weight and tracking,
+       which is what this pair does. .section-header is the older single-line
+       form, kept so any call site not yet converted still renders. */
+    .section-head {{
+        border-bottom: 1px solid {BORDER};
+        padding-bottom: 8px; margin: 14px 0 14px 0;
+    }}
+    .section-eyebrow {{
+        font-size: var(--fs-1); font-weight: 600; color: {MUTED};
+        text-transform: uppercase; letter-spacing: .15em;
+        margin-bottom: 2px;
+    }}
+    .section-title {{
+        font-size: var(--fs-4); font-weight: 650; color: {TEXT};
+        letter-spacing: -.01em; line-height: 1.25;
+    }}
     .section-header {{
-        font-size: .95rem; font-weight: 700; color: {TEXT};
+        font-size: var(--fs-3); font-weight: 700; color: {TEXT};
         text-transform: uppercase; letter-spacing: .06em;
         border-bottom: 1px solid {BORDER};
         padding-bottom: 8px; margin: 6px 0 14px 0;
@@ -145,7 +219,7 @@ CSS = f"""
     /* ── Pills ──────────────────────────────────────────────────────────── */
     .pill {{
         display: inline-block; padding: 2px 9px; border-radius: 999px;
-        font-size: .68rem; font-weight: 700; margin-left: 6px;
+        font-size: var(--fs-1); font-weight: 700; margin-left: 6px;
         letter-spacing: .04em; vertical-align: middle;
     }}
     .pill-live    {{ background: {BULL_DIM}; color: {BULL}; border: 1px solid {BULL_DIM}; }}
@@ -158,7 +232,7 @@ CSS = f"""
     }}
     .stTabs [data-baseweb="tab"] {{
         background: transparent; border: none; border-radius: 0;
-        color: {MUTED}; font-size: .82rem; font-weight: 600;
+        color: {MUTED}; font-size: var(--fs-2); font-weight: 600;
         padding: 9px 14px; margin: 0;
     }}
     .stTabs [data-baseweb="tab"]:hover {{ color: {TEXT}; background: {PANEL}; }}
@@ -172,7 +246,7 @@ CSS = f"""
     div[data-testid="stSidebar"] {{
         background-color: {SIDEBAR}; border-right: 1px solid {BORDER};
     }}
-    div[data-testid="stSidebar"] .stMarkdown p {{ font-size: .86rem; }}
+    div[data-testid="stSidebar"] .stMarkdown p {{ font-size: var(--fs-2); }}
 
     /* ── Inputs ─────────────────────────────────────────────────────────── */
     .stTextInput input, .stNumberInput input, .stTextArea textarea,
@@ -187,7 +261,7 @@ CSS = f"""
 
     /* ── Buttons ────────────────────────────────────────────────────────── */
     .stButton > button {{
-        border-radius: 8px; font-weight: 600; font-size: .84rem;
+        border-radius: 8px; font-weight: 600; font-size: var(--fs-2);
         border: 1px solid {BORDER}; background: {PANEL}; color: {TEXT};
         transition: all .15s ease;
     }}
@@ -204,7 +278,7 @@ CSS = f"""
     .stDataFrame {{ border: 1px solid {BORDER}; border-radius: 10px; }}
     .stDataFrame [role="columnheader"] {{
         background: {PANEL} !important; color: {MUTED} !important;
-        font-size: .72rem !important; text-transform: uppercase; letter-spacing: .05em;
+        font-size: var(--fs-1) !important; text-transform: uppercase; letter-spacing: .05em;
     }}
 
     /* ── Native metrics ─────────────────────────────────────────────────── */
@@ -213,10 +287,10 @@ CSS = f"""
         border-radius: 10px; padding: 12px 14px;
     }}
     [data-testid="stMetricLabel"] p {{
-        font-size: .70rem !important; color: {MUTED} !important;
+        font-size: var(--fs-1) !important; color: {MUTED} !important;
         text-transform: uppercase; letter-spacing: .06em; font-weight: 600;
     }}
-    [data-testid="stMetricValue"] {{ font-size: 1.5rem !important; font-weight: 700; }}
+    [data-testid="stMetricValue"] {{ font-size: var(--fs-5) !important; font-weight: 700; }}
 
     /* ── Alerts — flat, with a leading rule ─────────────────────────────── */
     div[data-testid="stAlert"] {{
@@ -227,7 +301,7 @@ CSS = f"""
     /* ── Expander / divider / misc ──────────────────────────────────────── */
     .streamlit-expanderHeader {{
         background: {PANEL}; border: 1px solid {BORDER};
-        border-radius: 8px; font-size: .84rem; font-weight: 600;
+        border-radius: 8px; font-size: var(--fs-2); font-weight: 600;
     }}
     hr {{ border-color: {BORDER}; margin: 1.1rem 0; }}
     #MainMenu, footer {{ visibility: hidden; }}
@@ -239,10 +313,10 @@ CSS = f"""
     /* ── Ticker header ──────────────────────────────────────────────────── */
     .ticker-head {{ display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
                    margin-bottom: 2px; }}
-    .ticker-sym  {{ font-size: 1.9rem; font-weight: 700; color: {TEXT}; letter-spacing: -.01em; }}
-    .ticker-name {{ font-size: .92rem; color: {MUTED}; }}
-    .quote-price {{ font-size: 2.3rem; font-weight: 700; color: {TEXT}; line-height: 1.1; }}
-    .quote-change {{ font-size: 1.0rem; font-weight: 600; }}
+    .ticker-sym  {{ font-size: var(--fs-6); font-weight: 700; color: {TEXT}; letter-spacing: -.01em; }}
+    .ticker-name {{ font-size: var(--fs-3); color: {MUTED}; }}
+    .quote-price {{ font-size: var(--fs-7); font-weight: 700; color: {TEXT}; line-height: 1.1; }}
+    .quote-change {{ font-size: var(--fs-3); font-weight: 600; }}
     .quote-up   {{ color: {BULL}; }}
     .quote-down {{ color: {BEAR}; }}
 </style>
@@ -263,6 +337,64 @@ def style_axes(fig, ax) -> None:
         a.title.set_color(TEXT)
         a.xaxis.label.set_color(MUTED)
         a.yaxis.label.set_color(MUTED)
+
+
+def verdict_bar(price: float, low: float, point: float, high: float) -> str:
+    """
+    The answer to the only question a visitor actually arrives with.
+
+    One sentence and one bar, above the fold, before any tab. The bar plots the
+    market price inside the model's p10–p90 range, because "12% undervalued" is
+    a different claim depending on whether the range is $10 wide or $200 — and
+    a point estimate quoted without its range is the thing this project exists
+    to argue against.
+    """
+    span = max(high - low, 1e-9)
+    pos = min(max((price - low) / span, 0.0), 1.0) * 100.0
+    pt = min(max((point - low) / span, 0.0), 1.0) * 100.0
+    gap = (point - price) / price * 100.0 if price else 0.0
+
+    if price < low:
+        word, cls = "below", "verdict-under"
+        tail = "the market is cheaper than the model's tenth percentile"
+    elif price > high:
+        word, cls = "above", "verdict-over"
+        tail = "the market is richer than the model's ninetieth percentile"
+    else:
+        word, cls = "inside", "verdict-inside"
+        tail = "the market sits within the model's range, so the signal is weak"
+
+    return (
+        f'<div class="verdict">'
+        f'<div class="verdict-line">'
+        f'Trading <span class="{cls}">{word}</span> the estimated range — '
+        f'<span class="{cls}">{gap:+.1f}%</span> to the point estimate. '
+        f'<span class="verdict-tail">{tail}.</span>'
+        f'</div>'
+        f'<div class="verdict-track">'
+        f'<div class="verdict-point" style="left:{pt:.2f}%"></div>'
+        f'<div class="verdict-mark" style="left:{pos:.2f}%"></div>'
+        f'</div>'
+        f'<div class="verdict-scale">'
+        f'<span>p10 ${low:,.2f}</span>'
+        f'<span>fair ${point:,.2f}</span>'
+        f'<span>p90 ${high:,.2f}</span>'
+        f'</div></div>'
+    )
+
+
+def section(title: str, eyebrow: str = "") -> str:
+    """
+    Section heading markup: a role eyebrow above the title, then a rule.
+
+    ``eyebrow`` says what kind of thing the section is ("VALIDATION",
+    "DERIVATIVES") and repeats across sections that share a purpose, so a reader
+    scanning a long tab can tell analysis from evidence without reading. Pass an
+    empty eyebrow for a subsection that continues the one above it.
+    """
+    eb = f'<div class="section-eyebrow">{eyebrow}</div>' if eyebrow else ""
+    return (f'<div class="section-head">{eb}'
+            f'<div class="section-title">{title}</div></div>')
 
 
 def source_pill(is_live: bool, live_label: str = "LIVE", offline_label: str = "OFFLINE") -> str:

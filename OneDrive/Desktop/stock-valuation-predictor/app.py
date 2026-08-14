@@ -82,7 +82,7 @@ from svp import reports, charts
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Intrinsic Stock Valuation Predictor",
-    page_icon="📊",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -182,19 +182,29 @@ def get_dcf_mc_cached(fcf0: float, shares: float, net_debt: float, wacc: float,
 # ──────────────────────────────────────────────────────────────────────────────
 # SIDEBAR
 # ──────────────────────────────────────────────────────────────────────────────
+# A result has to be addressable before it can be shared or returned to.
+# ?t=NVDA loads that ticker on arrival and the URL is rewritten after every
+# analysis, so the browser back button, a bookmark and a pasted link all work.
+# This is also the app's only organic acquisition channel: a link someone sends
+# a friend has to open on the thing they were looking at.
+_url_ticker = (st.query_params.get("t") or "").upper().strip()
+_default_ticker = _url_ticker or st.session_state.get("last_ticker") or "AAPL"
+
 with st.sidebar:
-    st.markdown("## 📊 Stock Valuation Predictor")
+    st.markdown("## Stock Valuation Predictor")
     st.markdown("*Webster University — MS Business Analytics*")
     st.divider()
 
-    ticker = st.text_input("🔤 Stock Ticker Symbol", value="AAPL", max_chars=6).upper().strip()
+    ticker = st.text_input(
+        "Stock Ticker Symbol", value=_default_ticker, max_chars=6,
+    ).upper().strip()
     use_live_price = st.checkbox("Use live market price (yfinance)", value=True)
     manual_price = st.number_input(
-        "💵 Market Price override ($)", min_value=0.0, value=0.0, step=0.5, format="%.2f",
+        "Market Price override ($)", min_value=0.0, value=0.0, step=0.5, format="%.2f",
         help="Leave 0 to use the live/last price. Enter a value to override.",
     )
 
-    with st.expander("📝 Earnings-call transcript (sentiment)"):
+    with st.expander("Earnings-call transcript (sentiment)"):
         transcript = st.text_area(
             "Paste transcript text (optional)", value="", height=120,
             help="Scored with FinBERT if available, else a finance lexicon.",
@@ -202,7 +212,7 @@ with st.sidebar:
         if st.checkbox("Use sample transcript"):
             transcript = sent_mod.SAMPLE_TRANSCRIPT
 
-    run_btn = st.button("🔍  Analyze", type="primary", width="stretch")
+    run_btn = st.button("Analyze", type="primary", width="stretch")
 
     st.divider()
     st.markdown("**Data & Model**")
@@ -211,14 +221,14 @@ with st.sidebar:
         "XGBoost (point + quantile) · SHAP/LIME · DCF Monte-Carlo"
     )
     cache_stats = storage.stats()
-    st.caption(f"💾 Cache: {cache_stats['backend']} · {cache_stats['fresh']}/{cache_stats['rows']} fresh rows")
+    st.caption(f"Cache: {cache_stats['backend']} · {cache_stats['fresh']}/{cache_stats['rows']} fresh rows")
     st.caption("⚠️ Educational use only. Not financial advice.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # HEADER + MODEL BANNER
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# 📈 Intrinsic Stock Valuation Predictor")
+st.markdown("# Intrinsic Stock Valuation Predictor")
 st.markdown("*Model Transparency · Live Data Pipelines · Scenario Analytics*")
 st.divider()
 
@@ -308,7 +318,19 @@ def run_analysis(ticker: str, price_override: float, transcript: str, use_live: 
 # ──────────────────────────────────────────────────────────────────────────────
 # RUN / STATE
 # ──────────────────────────────────────────────────────────────────────────────
-if run_btn:
+# Arriving on ?t=NVDA runs that ticker once, without a click. A shared link
+# that lands on an empty form has wasted the share; the guard keys on the
+# ticker so a later manual change does not re-trigger it.
+_auto_run = bool(
+    _url_ticker
+    and _url_ticker == ticker
+    and st.session_state.get("autorun_for") != _url_ticker
+    and (st.session_state.get("analysis") or {}).get("ticker") != _url_ticker
+)
+if _auto_run:
+    st.session_state["autorun_for"] = _url_ticker
+
+if run_btn or _auto_run:
     if not ticker:
         st.warning("Please enter a ticker symbol.")
     else:
@@ -337,20 +359,24 @@ if run_btn:
                 )
         else:
             st.session_state["analysis"] = analysis
+            st.session_state["last_ticker"] = ticker
+            # Put the ticker in the address bar so this result can be linked to.
+            if st.query_params.get("t") != ticker:
+                st.query_params["t"] = ticker
 
 analysis = st.session_state.get("analysis")
 
 if not analysis:
-    st.info("👈  Enter a ticker in the sidebar and click **Analyze** to begin.")
+    st.info("Enter a ticker in the sidebar and click **Analyze** to begin.")
     st.markdown("### What's inside")
     cols = st.columns(3)
     cards = [
-        ("🔍 Explainable AI", "SHAP / LIME waterfalls show exactly how each feature moved the valuation."),
-        ("📊 Valuation Range", "Quantile XGBoost + Monte-Carlo give an intrinsic-value range, not a single point."),
-        ("🌐 Live Pipelines", "yfinance prices, FRED macro (yield curve, CPI, rates), FinBERT sentiment."),
-        ("🧮 DCF & Scenario", "Interactive DCF with WACC / terminal-growth sliders, Monte-Carlo fair value."),
-        ("🏦 Peer Benchmarking", "EV/EBITDA, P/E, Debt/Equity vs auto-selected industry peers."),
-        ("📄 PDF Reports", "One-click equity research summary with feature impacts and signals."),
+        ("Explainable AI", "SHAP / LIME waterfalls show exactly how each feature moved the valuation."),
+        ("Valuation Range", "Quantile XGBoost + Monte-Carlo give an intrinsic-value range, not a single point."),
+        ("Live Pipelines", "yfinance prices, FRED macro (yield curve, CPI, rates), FinBERT sentiment."),
+        ("DCF & Scenario", "Interactive DCF with WACC / terminal-growth sliders, Monte-Carlo fair value."),
+        ("Peer Benchmarking", "EV/EBITDA, P/E, Debt/Equity vs auto-selected industry peers."),
+        ("PDF Reports", "One-click equity research summary with feature impacts and signals."),
     ]
     for i, (t, b) in enumerate(cards):
         with cols[i % 3]:
@@ -389,7 +415,12 @@ st.markdown(
     ),
     unsafe_allow_html=True,
 )
-st.write("")
+
+# ── Verdict — answered before the tabs, not inside one ───────────────────────
+st.markdown(
+    theme.verdict_bar(price, result.low, result.point, result.high),
+    unsafe_allow_html=True,
+)
 
 # ── Headline metric row ───────────────────────────────────────────────────────
 h1, h2, h3, h4 = st.columns(4)
@@ -406,11 +437,11 @@ h4.markdown(
 st.divider()
 
 tabs = st.tabs([
-    "📈 Charts", "📊 Valuation", "🔍 Explainability", "🧮 DCF & Scenario",
-    "🏦 Peers", "📉 Backtesting",
-    "🎯 Execution & Timing", "🛡️ Guardrails", "🔬 Screener", "📰 Filings Δ",
-    "🔎 Filings RAG", "⚡ Options & Futures",
-    "📄 Report",
+    "Charts", "Valuation", "Explainability", "DCF & Scenario",
+    "Peers", "Backtesting",
+    "Execution & Timing", "Guardrails", "Screener", "Filings Δ",
+    "Filings RAG", "Options & Futures",
+    "Report",
 ])
 
 TAB_LABELS = [
@@ -562,7 +593,7 @@ with tab_guard(0):
         st.divider()
 
         # ── Indicator panel ──────────────────────────────────────────────────────
-        st.markdown('<div class="section-header">📶 Indicator Panel</div>', unsafe_allow_html=True)
+        st.markdown(theme.section("Indicator panel", "Charts"), unsafe_allow_html=True)
         ic1, ic2 = st.columns([1.6, 1])
         with ic1:
             st.dataframe(iset.as_frame(), width="stretch", hide_index=True, height=420)
@@ -598,7 +629,7 @@ with tab_guard(0):
         )
 
     # ── Measured accuracy ────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">🎯 Measured Signal Accuracy</div>',
+    st.markdown(theme.section("Measured signal accuracy", "Validation"),
                 unsafe_allow_html=True)
     st.caption(
         f"Each indicator's call is recomputed at every bar and "
@@ -637,7 +668,7 @@ with tab_guard(1):
     _missing = raw.get("missing_fields") or []
     if _missing:
         st.info(
-            f"ℹ️ **{tk}** does not tag {', '.join(_missing)} in a form this parser "
+            f"**{tk}** does not tag {', '.join(_missing)} in a form this parser "
             f"recognises, so those inputs are blank. The model handles missing features "
             f"natively — the valuation still runs, but any ratio built on them is absent "
             f"from the feature table and the SHAP breakdown."
@@ -646,7 +677,7 @@ with tab_guard(1):
     left, right = st.columns([1.1, 1])
 
     with left:
-        st.markdown('<div class="section-header">📋 Extracted Features</div>', unsafe_allow_html=True)
+        st.markdown(theme.section("Extracted features", "Inputs"), unsafe_allow_html=True)
         disp = {}
         pct_feats = {"roe", "roa", "fcf_yield", "profit_margin", "revenue_yoy",
                      "revenue_qoq", "net_income_yoy", "fcf_yoy"}
@@ -667,12 +698,12 @@ with tab_guard(1):
         sent_obj = raw.get("sentiment_obj")
         if sent_obj is not None:
             st.caption(
-                f"🗣️ Earnings sentiment: **{sent_obj.label}** ({sent_obj.score:+.2f}) "
+                f"Earnings sentiment: **{sent_obj.label}** ({sent_obj.score:+.2f}) "
                 f"via {sent_obj.source}"
             )
 
     with right:
-        st.markdown('<div class="section-header">📊 Intrinsic Value Distribution</div>', unsafe_allow_html=True)
+        st.markdown(theme.section("Intrinsic value distribution", "Valuation"), unsafe_allow_html=True)
         fig, ax = plt.subplots(figsize=(5.5, 3.6))
         theme.style_axes(fig, ax)
         ax.hist(result.mc_samples, bins=40, color=theme.TEAL, alpha=0.7, edgecolor="none")
@@ -692,7 +723,7 @@ with tab_guard(1):
             f"Monte-Carlo mean \\${result.mc_mean:.2f} ± \\${result.mc_std:.2f}."
         )
 
-    st.markdown('<div class="section-header">📉 Price vs Intrinsic Range</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Price vs intrinsic range"), unsafe_allow_html=True)
     fig2, ax2 = plt.subplots(figsize=(9, 1.9))
     theme.style_axes(fig2, ax2)
     lo = min(price, result.low) * 0.9
@@ -711,9 +742,9 @@ with tab_guard(1):
 # TAB 2 — EXPLAINABILITY (SHAP / LIME)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_guard(2):
+    _attr_method = "SHAP" if attribution.source == "shap" else "XGBoost contributions"
     st.markdown(
-        f'<div class="section-header">🔍 Feature Attribution '
-        f'({"SHAP" if attribution.source == "shap" else "XGBoost contributions"})</div>',
+        theme.section(f"Feature attribution — {_attr_method}", "Explainability"),
         unsafe_allow_html=True,
     )
     st.caption(
@@ -749,7 +780,7 @@ with tab_guard(2):
         st.dataframe(show, width="stretch", hide_index=True, height=430)
 
     # Optional LIME.
-    st.markdown('<div class="section-header">🍋 LIME Local Explanation</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("LIME local explanation"), unsafe_allow_html=True)
     if explain_mod.has_lime():
         with st.spinner("Computing LIME explanation..."):
             lime_df = explain_mod.lime_explanation(feats, vm)
@@ -767,7 +798,7 @@ with tab_guard(2):
 # TAB 3 — DCF & SCENARIO
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_guard(3):
-    st.markdown('<div class="section-header">🧮 Discounted Cash Flow — Interactive</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Interactive DCF", "Discounted cash flow"), unsafe_allow_html=True)
     st.caption("Adjust the assumptions; the DCF and its Monte-Carlo distribution update live.")
 
     fcf0 = raw.get("free_cash_flow") or raw.get("op_cash_flow") or 1e9
@@ -798,7 +829,7 @@ with tab_guard(3):
 
     g1, g2 = st.columns(2)
     with g1:
-        st.markdown('<div class="section-header">Projected vs Discounted FCF</div>', unsafe_allow_html=True)
+        st.markdown(theme.section("Projected vs discounted FCF"), unsafe_allow_html=True)
         fig, ax = plt.subplots(figsize=(5.4, 3.4))
         theme.style_axes(fig, ax)
         yrs = list(range(1, int(years) + 1))
@@ -812,7 +843,7 @@ with tab_guard(3):
         st.pyplot(fig, width="stretch"); plt.close(fig)
 
     with g2:
-        st.markdown('<div class="section-header">Monte-Carlo Fair-Value Distribution</div>', unsafe_allow_html=True)
+        st.markdown(theme.section("Monte-Carlo fair-value distribution"), unsafe_allow_html=True)
         fig, ax = plt.subplots(figsize=(5.4, 3.4))
         theme.style_axes(fig, ax)
         ax.hist(dcf_mc["samples"], bins=45, color=theme.BLUE, alpha=0.75, edgecolor="none")
@@ -832,7 +863,7 @@ with tab_guard(3):
 # TAB 4 — PEERS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_guard(4):
-    st.markdown('<div class="section-header">🏦 Peer Group Benchmarking</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Peer group benchmarking", "Peers"), unsafe_allow_html=True)
     self_metrics = {
         "name": raw.get("name", tk),
         "pe": feats.get("pe_ratio"),
@@ -853,7 +884,7 @@ with tab_guard(4):
     st.dataframe(styled, width="stretch", hide_index=True)
 
     summ = peers_mod.peer_summary(pdf)
-    st.markdown('<div class="section-header">Relative Positioning vs Peer Median</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Relative positioning vs peer median"), unsafe_allow_html=True)
     # The pill is coloured strictly by the sign of the difference: above peers
     # is green, below peers is red. For valuation multiples and leverage that
     # is the opposite of "good for the buyer" — a P/E far above peers means an
@@ -913,7 +944,7 @@ with tab_guard(4):
 # TAB 5 — BACKTESTING
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_guard(5):
-    st.markdown('<div class="section-header">📉 Historical Backtesting Engine</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Historical backtesting", "Validation"), unsafe_allow_html=True)
     st.caption(
         "How the valuation signal would have performed against actual price moves over "
         "1-, 3- and 5-year forward horizons (monthly rebalances). "
@@ -935,7 +966,7 @@ with tab_guard(5):
                 st.caption(f"Avg fwd return after BUY: {r.avg_forward_return*100:+.1f}%")
 
         if curve is not None:
-            st.markdown('<div class="section-header">Strategy vs Buy & Hold (growth of $1)</div>',
+            st.markdown(theme.section("Strategy vs buy &amp; hold — growth of $1"),
                         unsafe_allow_html=True)
             fig, ax = plt.subplots(figsize=(9, 3.6))
             theme.style_axes(fig, ax)
@@ -955,7 +986,7 @@ with tab_guard(5):
 # TAB 6 — EXECUTION & TIMING (regime + technical filters + sizing/risk floors)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_guard(6):
-    st.markdown('<div class="section-header">🌐 Macro Regime</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Macro regime", "Regime"), unsafe_allow_html=True)
     rc1, rc2, rc3, rc4 = st.columns(4)
     rc1.metric("Regime", regime.regime, help=f"Detected via {regime.source.upper()}")
     rc2.metric("Confidence", f"{regime.confidence*100:.0f}%")
@@ -965,7 +996,7 @@ with tab_guard(6):
     st.caption(regime.description)
 
     if regime.timeline is not None and len(regime.timeline) > 0:
-        st.markdown('<div class="section-header">Regime Timeline (VIX-driven HMM)</div>', unsafe_allow_html=True)
+        st.markdown(theme.section("Regime timeline — VIX-driven HMM"), unsafe_allow_html=True)
         code = {"Calm": 0, "Neutral": 1, "Stress": 2, "Crisis": 3}
         tl = regime.timeline.map(code)
         fig, ax = plt.subplots(figsize=(9, 2.4))
@@ -978,7 +1009,7 @@ with tab_guard(6):
         st.pyplot(fig, width="stretch"); plt.close(fig)
 
     st.divider()
-    st.markdown('<div class="section-header">📐 Technical Entry Filters</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Technical entry filters", "Execution"), unsafe_allow_html=True)
     if technical is None:
         st.warning("Not enough price history for technical confirmation.")
     else:
@@ -1008,7 +1039,7 @@ with tab_guard(6):
             st.info("No active undervalued signal to confirm right now.")
 
     st.divider()
-    st.markdown('<div class="section-header">⚖️ Risk-Adjusted Sizing & Execution</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Risk-adjusted sizing"), unsafe_allow_html=True)
     scols = st.columns(4)
     scols[0].markdown(metric_card("Fractional Kelly", f"{sizing.fractional_kelly*100:.1f}%", sub=True),
                       unsafe_allow_html=True)
@@ -1033,7 +1064,7 @@ with tab_guard(6):
 # TAB 7 — GUARDRAILS (quality/distress scores + insider/short)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_guard(7):
-    st.markdown('<div class="section-header">🛡️ Value-Trap & Distress Guardrails</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Value-trap &amp; distress screens", "Guardrails"), unsafe_allow_html=True)
     st.caption("Forensic-accounting scores prevent the model from rating structurally "
                "broken companies as bargains.")
 
@@ -1066,17 +1097,17 @@ with tab_guard(7):
         st.success("✅ No distress/manipulation guardrails triggered.")
 
     if qs.piotroski_detail:
-        st.markdown('<div class="section-header">Piotroski Components</div>', unsafe_allow_html=True)
+        st.markdown(theme.section("Piotroski components"), unsafe_allow_html=True)
         pdet = pd.DataFrame(
             [(k, "✅" if v == 1 else ("❌" if v == 0 else "—")) for k, v in qs.piotroski_detail.items()],
             columns=["Criterion", "Pass"],
         )
         st.dataframe(pdet, width="stretch", hide_index=True)
     for n in qs.notes:
-        st.caption(f"ℹ️ {n}")
+        st.caption(f"{n}")
 
     st.divider()
-    st.markdown('<div class="section-header">👥 Insider Activity & Short Interest</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Insider activity &amp; short interest"), unsafe_allow_html=True)
     with st.spinner("Fetching Form 4 & short interest..."):
         ins = get_insider_cached(tk, raw.get("cik") or "")
     st.session_state["rep_insider"] = ins
@@ -1096,7 +1127,7 @@ with tab_guard(7):
 # TAB 8 — SCREENER (quantile ranking + relative return)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_guard(8):
-    st.markdown('<div class="section-header">🔬 Cross-Sectional Screener</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Cross-sectional screener", "Screener"), unsafe_allow_html=True)
     st.caption("Rank a universe by margin-of-safety (p50 vs price) and expected excess "
                "return; buys are flagged only in the top decile.")
 
@@ -1105,7 +1136,7 @@ with tab_guard(8):
         "Universe (comma-separated tickers)",
         value=", ".join(screener_mod.DEFAULT_UNIVERSE[:12]),
     )
-    run_screen = st.button("🔎 Run Screen", type="primary")
+    run_screen = st.button("Run Screen", type="primary")
 
     if run_screen:
         universe = [t.strip().upper() for t in universe_txt.split(",") if t.strip()]
@@ -1131,7 +1162,7 @@ with tab_guard(8):
                 show[c] = show[c].map(lambda x: f"${x:.2f}")
             st.dataframe(show, width="stretch", hide_index=True)
             top = sdf[sdf["TopDecile"]]
-            st.success(f"🏆 Top-decile buys: {', '.join(top['Ticker'].tolist()) or '—'}")
+            st.success(f"Top-decile buys: {', '.join(top['Ticker'].tolist()) or '—'}")
     else:
         st.info("Enter a universe and click **Run Screen**. "
                 "Note: live fundamentals are needed to score real tickers.")
@@ -1140,7 +1171,7 @@ with tab_guard(8):
 # TAB 9 — FILINGS Δ (10-K/10-Q textual divergence)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_guard(9):
-    st.markdown('<div class="section-header">📰 Fundamental-Delta NLP</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Fundamental-delta NLP", "Filings"), unsafe_allow_html=True)
     st.caption("Cosine-similarity divergence between consecutive SEC filings flags rapid "
                "changes in risk-factor disclosures before the market digests them.")
 
@@ -1150,13 +1181,13 @@ with tab_guard(9):
         c1, c2 = st.columns(2)
         latest_txt = c1.text_area("Latest filing text", value=nlp_mod.SAMPLE_LATEST, height=160)
         prior_txt = c2.text_area("Prior filing text", value=nlp_mod.SAMPLE_PRIOR, height=160)
-        run_nlp = st.button("🧬 Compare", type="primary")
+        run_nlp = st.button("Compare", type="primary")
         if run_nlp:
             fd = nlp_mod.compare_texts(latest_txt, prior_txt)
         else:
             fd = None
     else:
-        run_nlp = st.button("🧬 Fetch & Compare", type="primary")
+        run_nlp = st.button("Fetch & Compare", type="primary")
         fd = None
         if run_nlp:
             with st.spinner("Fetching filings from SEC EDGAR..."):
@@ -1187,7 +1218,7 @@ with tab_guard(9):
 # TAB 11 — FILINGS RAG (retrieval-augmented Q&A over 10-K / 10-Q text)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_guard(10):
-    st.markdown('<div class="section-header">🔎 Ask the Filings</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Ask the filings", "Filings"), unsafe_allow_html=True)
     st.caption(
         "Retrieval-augmented Q&A over this company's SEC filings. Text is pulled from "
         "EDGAR, split on Item boundaries, chunked and indexed in memory, so every answer "
@@ -1206,7 +1237,7 @@ with tab_guard(10):
     with rc3:
         rag_k = st.slider("Passages to return", 2, 10, 5, key="rag_k")
 
-    if st.button("📥 Load & index filings", type="primary", key="rag_load"):
+    if st.button("Load & index filings", type="primary", key="rag_load"):
         with st.spinner(f"Fetching {rag_form} filings for {tk} from SEC EDGAR..."):
             latest_f, prior_f = rag_mod.filings.latest_pair(tk, form=rag_form)
         if latest_f is None or not latest_f.text:
@@ -1311,7 +1342,7 @@ with tab_guard(10):
 
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_guard(11):
-    st.markdown('<div class="section-header">⚡ Live Option Chain</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Live option chain", "Derivatives"), unsafe_allow_html=True)
     st.caption(
         "Strikes, bid/ask, open interest and implied volatility pulled from "
         "`yfinance.Ticker.option_chain(date)`. Falls back to a Black-Scholes-priced "
@@ -1333,7 +1364,7 @@ with tab_guard(11):
     ec1, ec2 = st.columns([1, 2])
     with ec1:
         expiry = st.selectbox("Expiry", expiries, index=_default_idx, key="opt_expiry")
-        if st.button("🔄 Refresh chain", key="opt_refresh"):
+        if st.button("Refresh chain", key="opt_refresh"):
             options_mod.clear_cache()
         rf_rate = st.number_input(
             "Risk-free rate (r)", value=float(macro_now.fed_funds or 4.5) / 100.0,
@@ -1396,7 +1427,7 @@ with tab_guard(11):
     _repaired = int(chain.calls["ivRepaired"].sum() + chain.puts["ivRepaired"].sum())
     if _repaired:
         st.caption(
-            f"ℹ️ {_repaired} contract(s) came back from the feed with an implausible "
+            f"{_repaired} contract(s) came back from the feed with an implausible "
             f"implied volatility (Yahoo often reports ~0 on near-dated strikes); their IV "
             f"was re-solved from the quoted premium. Contracts that could not be re-solved "
             f"show a blank IV and fall back to the slider volatility below."
@@ -1423,7 +1454,7 @@ with tab_guard(11):
     st.divider()
 
     # ── Black-Scholes pricer + Greeks ────────────────────────────────────────
-    st.markdown('<div class="section-header">🧪 Theoretical Pricer & Greeks</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Theoretical pricer &amp; Greeks"), unsafe_allow_html=True)
     st.caption(
         "Black-Scholes-Merton analytic value cross-checked against a Cox-Ross-Rubinstein "
         "binomial tree (American exercise) and a GBM Monte-Carlo."
@@ -1469,7 +1500,7 @@ with tab_guard(11):
     st.divider()
 
     # ── Valuation → options bridge ───────────────────────────────────────────
-    st.markdown('<div class="section-header">🌉 Intrinsic-Value → Options Bridge</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Intrinsic value to options bridge"), unsafe_allow_html=True)
     st.caption(
         "Treats the model's intrinsic target as the **projected underlying at expiry (Sₜ)** "
         "and discounts the resulting payoff back to today. Contracts whose premium sits "
@@ -1606,7 +1637,7 @@ with tab_guard(11):
     st.divider()
 
     # ── Futures cost-of-carry ────────────────────────────────────────────────
-    st.markdown('<div class="section-header">📦 Futures Cost-of-Carry</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Futures cost-of-carry"), unsafe_allow_html=True)
     st.latex(r"F = S \cdot e^{(r + s - c)\,T}")
 
     f1, f2, f3, f4 = st.columns(4)
@@ -1669,7 +1700,7 @@ with tab_guard(11):
 # TAB 11 — REPORT
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_guard(12):
-    st.markdown('<div class="section-header">📄 One-Click Equity Research Report</div>', unsafe_allow_html=True)
+    st.markdown(theme.section("Equity research report", "Report"), unsafe_allow_html=True)
     st.caption(
         "Generate a formatted PDF covering every tab: valuation range and signal, "
         "fundamentals, SHAP impacts, DCF, peers, backtest, regime and technical timing, "
@@ -1694,11 +1725,11 @@ with tab_guard(12):
     # been computed — flag the gaps rather than silently dropping them.
     pending = []
     if "Screener" in want and st.session_state.get("rep_screener") is None:
-        pending.append("Screener (run a screen on the 🔬 Screener tab)")
+        pending.append("Screener (run a screen on the Screener tab)")
     if "Filing divergence" in want and st.session_state.get("rep_filings") is None:
-        pending.append("Filing divergence (run a comparison on the 📰 Filings Δ tab)")
+        pending.append("Filing divergence (run a comparison on the Filings Δ tab)")
     if "Options & futures" in want and st.session_state.get("rep_options") is None:
-        pending.append("Options & futures (open the ⚡ Options & Futures tab once)")
+        pending.append("Options & futures (open the Options & Futures tab once)")
     if pending:
         st.info("Not yet computed, so these will be skipped: " + "; ".join(pending))
 
@@ -1721,7 +1752,7 @@ with tab_guard(12):
             f"accuracy horizon, following the Charts tab. Change them there to change the report."
         )
 
-    if st.button("🧾 Generate Report", type="primary"):
+    if st.button("Generate Report", type="primary"):
         with st.spinner("Building report..."):
             dcf_payload = None
             if "DCF" in want:
@@ -1797,7 +1828,7 @@ with tab_guard(12):
         mime = "application/pdf" if ext == "pdf" else "text/plain"
         st.success(f"Report ready ({len(pdf_bytes):,} bytes).")
         st.download_button(
-            f"⬇️ Download {tk} Equity Report (.{ext})",
+            f"Download {tk} Equity Report (.{ext})",
             data=pdf_bytes,
             file_name=f"{tk}_equity_report.{ext}",
             mime=mime,
