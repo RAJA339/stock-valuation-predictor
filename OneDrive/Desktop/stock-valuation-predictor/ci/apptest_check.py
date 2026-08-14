@@ -26,7 +26,18 @@ from svp.analytics import technical as TA
 from svp.data import market as market_mod, macro as macro_mod
 from svp.features import FEATURE_COLUMNS
 
-EXPECTED_TABS = 15
+# The nav is two levels: six sections, and panes nested inside five of them.
+# Asserting a flat tab count would have to change every time a pane moves
+# between sections, so the check is on the pane set the app actually built.
+EXPECTED_SECTIONS = 6
+EXPECTED_PANES = {
+    "Charts", "Execution & Timing",
+    "Valuation", "Explainability", "DCF & Scenario", "Peers", "Screener",
+    "Guardrails", "Backtesting", "Options & Futures",
+    "Ask the Filings", "Fundamental Δ",
+    "Watchlist", "Track Record",
+    "Report",
+}
 
 
 def build_seed_analysis():
@@ -86,14 +97,20 @@ def check_healthy(seed):
             print(" ", repr(e)[:300])
         sys.exit(1)
 
-    n_tabs = len(at.tabs)
     n_metrics = len(at.metric)
-    print(f"tabs rendered: {n_tabs}")
+    print(f"tab containers: {len(at.tabs)}")
     print(f"metrics rendered: {n_metrics}")
     print(f"errors: {[e.value[:80] for e in at.error]}")
 
-    if n_tabs != EXPECTED_TABS:
-        print(f"APPTEST FAILED — expected {EXPECTED_TABS} tabs, got {n_tabs}")
+    labels = set(at.session_state["pane_labels"])
+    if labels != EXPECTED_PANES:
+        print(f"APPTEST FAILED — pane set differs.\n"
+              f"  missing: {sorted(EXPECTED_PANES - labels)}\n"
+              f"  unexpected: {sorted(labels - EXPECTED_PANES)}")
+        sys.exit(1)
+    n_sections = at.session_state["section_count"]
+    if n_sections != EXPECTED_SECTIONS:
+        print(f"APPTEST FAILED — expected {EXPECTED_SECTIONS} sections, got {n_sections}")
         sys.exit(1)
     if at.error:
         print("APPTEST FAILED — app emitted st.error output")
@@ -135,8 +152,8 @@ def check_tab_isolation(seed, baseline_metrics):
     if list(failures) != ["Peers"]:
         print(f"APPTEST FAILED — expected only Peers to fail, got {list(failures)}")
         sys.exit(1)
-    if len(at.tabs) != EXPECTED_TABS:
-        print(f"APPTEST FAILED — expected {EXPECTED_TABS} tabs, got {len(at.tabs)}")
+    if set(at.session_state["pane_labels"]) != EXPECTED_PANES:
+        print("APPTEST FAILED — a pane vanished when one of them raised")
         sys.exit(1)
     # Peers renders its cards as HTML, not st.metric, so a contained failure
     # there should cost no metrics at all. Downstream tabs must be untouched.
