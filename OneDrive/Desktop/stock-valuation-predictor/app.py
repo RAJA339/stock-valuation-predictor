@@ -75,6 +75,7 @@ from svp.models import (
 from svp.analytics import (
     peers as peers_mod, technical as technical_mod, quality as quality_mod,
     screener as screener_mod, indicators as ind_mod, accuracy as acc_mod,
+    microstructure as micro_mod,
 )
 from svp.data import intraday as intraday_mod
 from svp import rag as rag_mod
@@ -515,7 +516,7 @@ st.divider()
 # arithmetic and worse groups. The grouping is by what a reader wants, not by
 # what the code shares.
 SECTIONS: list[tuple[str, list[str]]] = [
-    ("Market",    ["Charts", "Execution & Timing"]),
+    ("Market",    ["Charts", "Execution & Timing", "Microstructure"]),
     ("Value",     ["Valuation", "Explainability", "DCF & Scenario", "Peers", "Screener"]),
     ("Risk",      ["Guardrails", "Backtesting", "Options & Futures"]),
     ("Filings",   ["Ask the Filings", "Fundamental Δ", "Segments"]),
@@ -2311,3 +2312,130 @@ with tab_guard("Segments"):
             "disaggregate, and some filers place the disclosure in a table this "
             "parser does not recognise."
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MICROSTRUCTURE — the documented footprint of institutional execution
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_guard("Microstructure"):
+    st.markdown(theme.section("How the flow moves the price", "Market"),
+                unsafe_allow_html=True)
+    st.caption(
+        "The honest version of what institutions do that retail does not see. "
+        "Not secret algorithms and not manipulation — a delayed price feed shows "
+        "neither — but the aggregate, *documented* footprint of how large "
+        "execution actually clears. Every figure below carries its sample size "
+        "and, where it is a claim about the future, a confidence interval. "
+        "Several of these are real anomalies; none of them is a guaranteed edge."
+    )
+
+    # ── Overnight vs intraday ────────────────────────────────────────────────
+    _split = micro_mod.overnight_intraday_split(md.history)
+    st.markdown(theme.section("Overnight vs the tradable session", ""),
+                unsafe_allow_html=True)
+    if _split is None:
+        st.info("Not enough daily history to decompose the return.")
+    else:
+        st.caption(
+            "Splitting each day into the overnight gap (close→open, when you "
+            "cannot trade) and the intraday session (open→close, when you can). "
+            "The published anomaly — Cooper–Cliff–Gulen and others — is that "
+            "historically most of the equity return accrued overnight while the "
+            "session a day-trader lives in drifted flat or negative."
+        )
+        _c1, _c2, _c3 = st.columns(3)
+        _c1.markdown(
+            metric_card("Overnight", f"{_split.overnight_mean_bp:+.1f} bp/day", sub=True)
+            + f'<div class="metric-note">compounded {_split.overnight_total:+.0f}% over {_split.n_days}d</div>',
+            unsafe_allow_html=True)
+        _c2.markdown(
+            metric_card("Intraday", f"{_split.intraday_mean_bp:+.1f} bp/day", sub=True)
+            + f'<div class="metric-note">compounded {_split.intraday_total:+.0f}%</div>',
+            unsafe_allow_html=True)
+        _c3.markdown(
+            metric_card("Close-to-close", f"{_split.total:+.0f}%", sub=True)
+            + '<div class="metric-note">the two legs, recombined</div>',
+            unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="verdict"><div class="verdict-line">{_split.verdict}.'
+            '</div></div>', unsafe_allow_html=True)
+
+    # ── Time-of-day profile ──────────────────────────────────────────────────
+    st.markdown(theme.section("When the size trades", ""), unsafe_allow_html=True)
+    _intr = intraday_mod.get_intraday(tk, "30m", spot_fallback=price)
+    _prof = micro_mod.time_of_day_profile(_intr.df)
+    if _prof is None:
+        st.info("Intraday history unavailable, so the time-of-day profile is empty.")
+    else:
+        st.caption(
+            f"Averaged over {_prof.n_sessions} sessions of 30-minute bars. Volume "
+            "and volatility trace a U across the day — heavy at the open and into "
+            "the close, thin at midday — the residue of VWAP/TWAP schedules and "
+            "the closing auction. The open and the last half-hour are where a "
+            "retail order is most likely to be run over."
+            + ("" if _intr.is_live else " *(synthetic data — live feed unavailable.)*")
+        )
+        fig, ax = plt.subplots(figsize=(9, 3.0))
+        theme.style_axes(fig, ax)
+        _x = np.arange(len(_prof.labels))
+        ax.bar(_x, _prof.volume_share, color=theme.GREEN, alpha=0.85, label="Volume share (%)")
+        ax2 = ax.twinx()
+        ax2.plot(_x, _prof.volatility, color=theme.CHAMPAGNE, lw=1.8, marker="o",
+                 ms=3, label="Volatility (bp)")
+        ax2.tick_params(colors=theme.MUTED)
+        ax.set_xticks(_x[::2]); ax.set_xticklabels(_prof.labels[::2], fontsize=7, rotation=45)
+        ax.set_ylabel("Volume share (%)"); ax2.set_ylabel("Mean |return| (bp)")
+        st.pyplot(fig, width="stretch"); plt.close(fig)
+        if _prof.busiest_label:
+            st.caption(f"Heaviest bucket: **{_prof.busiest_label}**.")
+
+    # ── Liquidity sweeps ─────────────────────────────────────────────────────
+    st.markdown(theme.section("Stop-runs, measured", ""), unsafe_allow_html=True)
+    _sweeps = micro_mod.liquidity_sweeps(md.history)
+    if _sweeps is None:
+        st.info("Not enough daily history to study sweeps.")
+    else:
+        st.caption(
+            "A downside sweep is a day that pierces the prior 20 days' low then "
+            "closes back above it — stops taken, then price reclaimed, the "
+            "'stop-run' retail lore describes. The reversal rate is measured with "
+            "a Wilson interval, so a pattern that is really just noise reports as "
+            "noise. Read the confidence interval, not the headline percentage."
+        )
+        _sc = st.columns(2)
+        for _col, _key in zip(_sc, ("downside", "upside")):
+            _st = _sweeps[_key]
+            with _col:
+                _cls = "verdict-under" if _st.is_better_than_chance else "verdict-inside"
+                st.markdown(
+                    metric_card(f"{_key.title()} sweep reversal",
+                                f"{_st.reversal_rate*100:.0f}%", sub=True)
+                    + f'<div class="metric-note">95% CI '
+                    f'{_st.ci_low*100:.0f}–{_st.ci_high*100:.0f}% · '
+                    f'{_st.n_events} events</div>'
+                    + f'<span class="{_cls}">{_st.verdict}</span>',
+                    unsafe_allow_html=True)
+
+    # ── Round-number magnetism ───────────────────────────────────────────────
+    _rn = micro_mod.round_number_magnetism(md.history)
+    if _rn is not None:
+        st.markdown(theme.section("Round-number magnetism", ""), unsafe_allow_html=True)
+        st.caption(
+            f"Closes within {0.1:.1f}% of a ${_rn.step:g} level, against what a "
+            "uniform distribution would place there. Round numbers concentrate "
+            "resting orders and stops, so price is often said to be drawn to "
+            "them; the excess over the baseline is the only honest evidence."
+        )
+        _r1, _r2 = st.columns(2)
+        _r1.markdown(metric_card("Closes near round levels", f"{_rn.near_rate:.1f}%"),
+                     unsafe_allow_html=True)
+        _r2.markdown(
+            metric_card("Excess over chance", f"{_rn.excess:+.1f} pts", sub=True)
+            + f'<div class="metric-note">{"clustering present" if _rn.is_magnetic else "no clear clustering"}</div>',
+            unsafe_allow_html=True)
+
+    st.caption(
+        "None of the above is trading advice. The point of measuring these is the "
+        "opposite of a signal service: to show which patterns survive an honest "
+        "confidence interval and which evaporate — because most do."
+    )
