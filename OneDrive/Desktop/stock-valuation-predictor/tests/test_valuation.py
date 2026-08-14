@@ -241,3 +241,68 @@ class TestPeerTableDtypes:
         # The offline estimator always fills these, so coercion must not have
         # turned real numbers into NaN.
         assert df["P/E"].notna().any()
+
+
+# ── Verdict bar ──────────────────────────────────────────────────────────────
+class TestVerdictBar:
+    """
+    The bar is the first thing a visitor reads, so its geometry has to be right
+    even when the price sits outside the model's range — which is exactly the
+    case a strong signal produces.
+    """
+
+    def _pos(self, html, cls):
+        import re
+        m = re.search(rf'class="{cls}" style="left:([0-9.]+)%"', html)
+        assert m, f"{cls} marker missing from {html[:200]}"
+        return float(m.group(1))
+
+    def test_price_inside_range_is_positioned_proportionally(self):
+        from svp import theme
+        html = theme.verdict_bar(price=150.0, low=100.0, point=160.0, high=200.0)
+        assert self._pos(html, "verdict-mark") == pytest.approx(50.0)
+        assert self._pos(html, "verdict-point") == pytest.approx(60.0)
+        assert "verdict-inside" in html
+
+    def test_price_below_range_pins_to_the_left_edge(self):
+        from svp import theme
+        html = theme.verdict_bar(price=50.0, low=100.0, point=160.0, high=200.0)
+        assert self._pos(html, "verdict-mark") == 0.0
+        assert "verdict-under" in html
+        assert "+220.0%" in html            # (160-50)/50
+
+    def test_price_above_range_pins_to_the_right_edge(self):
+        from svp import theme
+        html = theme.verdict_bar(price=400.0, low=100.0, point=160.0, high=200.0)
+        assert self._pos(html, "verdict-mark") == 100.0
+        assert "verdict-over" in html
+        assert "-60.0%" in html
+
+    def test_degenerate_range_does_not_divide_by_zero(self):
+        from svp import theme
+        html = theme.verdict_bar(price=100.0, low=100.0, point=100.0, high=100.0)
+        assert "verdict" in html            # no exception, renders something
+
+    def test_zero_price_does_not_divide_by_zero(self):
+        from svp import theme
+        assert theme.verdict_bar(price=0.0, low=10.0, point=20.0, high=30.0)
+
+
+# ── Type scale ───────────────────────────────────────────────────────────────
+def test_theme_css_has_no_literal_font_sizes():
+    """
+    Every rule sizes itself from the scale. A literal rem value creeping back in
+    is how seventeen ad-hoc sizes accumulated the first time.
+    """
+    import re
+    from svp import theme
+
+    body = theme.CSS.split("--fs-7", 1)[1]
+    literals = re.findall(r"font-size: *((?:\d*\.\d+|\d+)rem)", body)
+    assert not literals, f"literal font sizes outside the scale: {sorted(set(literals))}"
+
+
+def test_section_helper_emits_eyebrow_only_when_given():
+    from svp import theme
+    assert "section-eyebrow" in theme.section("Peer group benchmarking", "Peers")
+    assert "section-eyebrow" not in theme.section("Piotroski components")
