@@ -129,3 +129,27 @@ def reset_for_tests() -> None:
     _pg_checked = False
     _sqlite_ddl_done.clear()
     _pg_ddl_done.clear()
+
+
+# ── Durability ───────────────────────────────────────────────────────────────
+def is_durable() -> bool:
+    """
+    True when saved work survives a redeploy.
+
+    SQLite writes to the container filesystem. On Streamlit Cloud — and any
+    other ephemeral host — that filesystem is rebuilt on every deploy, so a
+    ledger and watchlist stored there are silently erased. That is worse than
+    not offering the feature: the user was told their record was being kept.
+    """
+    return pg() is not None
+
+
+def durability_note() -> str:
+    """One sentence for the UI, saying which of the two situations applies."""
+    if is_durable():
+        return "Saved to PostgreSQL — your record persists across deployments."
+    return (
+        "Saved to a local SQLite file. On a hosted deployment that file is "
+        "rebuilt on every redeploy, so this record can be lost. Set "
+        "SVP_DATABASE_URL to a PostgreSQL database to keep it."
+    )

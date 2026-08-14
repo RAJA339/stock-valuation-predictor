@@ -15,12 +15,22 @@ env:
 
 jobs:
   smoke-test:
+    # 3.13 is blocking; 3.14 is advisory. Streamlit Cloud runs 3.14, so a green
+    # matrix that stopped at 3.12 was telling us nothing about production — but
+    # 3.14 wheel availability for xgboost, shap and friends is upstream's
+    # timetable, not ours, and a merge should not be gated on it. The 3.14 job
+    # still reports its failure loudly in the Actions tab; it just does not
+    # block. Promote it to blocking once it has been green for a while.
     name: Build & smoke-test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.advisory || false }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - python-version: "3.14"
+            advisory: true
 
     defaults:
       run:
