@@ -65,7 +65,7 @@ from svp.data import (
     sec as sec_mod, insider as insider_mod, filings_nlp as nlp_mod,
     options as options_mod, predictions as pred_mod,
     watchlist as watch_mod, calendar as cal_mod, segments as seg_mod,
-    crypto as crypto_mod, _userdb,
+    crypto as crypto_mod, crypto_futures as cfut_mod, _userdb,
 )
 from svp.models import (
     valuation as val_mod, explain as explain_mod, dcf as dcf_mod, backtest as bt_mod,
@@ -75,7 +75,7 @@ from svp.models import (
 from svp.analytics import (
     peers as peers_mod, technical as technical_mod, quality as quality_mod,
     screener as screener_mod, indicators as ind_mod, accuracy as acc_mod,
-    microstructure as micro_mod,
+    microstructure as micro_mod, quant as quant_mod,
 )
 from svp.data import intraday as intraday_mod
 from svp import rag as rag_mod
@@ -2701,3 +2701,124 @@ new TradingView.widget({{
             "Auto-refresh needs Streamlit 1.38+ for `st.fragment`; this build "
             "updates when you interact with the page."
         )
+
+    st.divider()
+
+    # ── Advanced analytics ───────────────────────────────────────────────────
+    # Computed on daily history, which moves slowly, so this sits outside the
+    # live fragment rather than recomputing every tick.
+    _cx_daily = get_market_cached(_coin.yf, 0.0)
+    _cx_close = _cx_daily.history["Close"] if not _cx_daily.history.empty else None
+
+    st.markdown(theme.section("Advanced analytics", "Quant"), unsafe_allow_html=True)
+    st.caption(
+        "Tools that characterise the series without predicting it — volatility, "
+        "regime and persistence. A price *forecast* is deliberately not here: an "
+        "ML model that calls the next move is only worth trusting once its "
+        "calibration has been measured over months, exactly as the valuation "
+        "ledger measures itself. Until that exists, this reports what the data "
+        "*is*, not what it will do."
+    )
+
+    if _cx_close is None or len(_cx_close) < 40:
+        st.info("Not enough daily history for the advanced analytics on this coin.")
+    else:
+        _vp = quant_mod.volatility(_cx_close)
+        _reg = quant_mod.vol_regime(_cx_close)
+        _hurst = quant_mod.hurst_exponent(_cx_close)
+
+        _q1, _q2, _q3 = st.columns(3)
+        _vp_note = (f'<div class="metric-note">EWMA {_vp.ewma_pct:.0f}%</div>'
+                    if _vp.ewma_pct is not None else "")
+        _q1.markdown(
+            metric_card("Realized Vol (ann.)",
+                        f"{_vp.realized_pct:.0f}%" if _vp.realized_pct else "—", sub=True)
+            + _vp_note,
+            unsafe_allow_html=True)
+        if _reg is not None:
+            _q2.markdown(
+                metric_card("Vol Regime", _reg.label, sub=True)
+                + f'<div class="metric-note">{_reg.percentile:.0f}th percentile of '
+                'its own 6-month history</div>',
+                unsafe_allow_html=True)
+        if _hurst.exponent is not None:
+            _q3.markdown(
+                metric_card("Hurst", f"{_hurst.exponent:.2f}", sub=True)
+                + '<div class="metric-note">0.5 = random walk</div>',
+                unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="verdict"><div class="verdict-line">{_hurst.reading}.'
+            '</div></div>', unsafe_allow_html=True)
+        st.caption(
+            "EWMA volatility (RiskMetrics λ=0.94) weights recent moves more, so a "
+            "reading above the realized figure means volatility is rising now. The "
+            "regime label is relative to this coin's own history, not an absolute "
+            "threshold — 60% vol is calm for one coin and a shock for another."
+        )
+
+    # ── Futures & funding ────────────────────────────────────────────────────
+    st.markdown(theme.section("Perpetual futures — funding &amp; basis", "Futures"),
+                unsafe_allow_html=True)
+    st.caption(
+        "Crypto futures are mostly perpetual swaps, kept pegged to spot by a "
+        "**funding rate** exchanged every 8 hours. Positive funding means longs "
+        "pay shorts — crowded-bullish and a squeeze risk; negative is the mirror. "
+        "It is the crypto cost-of-carry."
+    )
+    _binance_sym = _coin.tv.split(":", 1)[1] if ":" in _coin.tv else _coin.tv
+    _funding = cfut_mod.get_funding(_binance_sym)
+
+    if _funding is not None:
+        _f1, _f2, _f3 = st.columns(3)
+        _f1.markdown(
+            metric_card("Funding (8h)", f"{_funding.funding_rate*100:.4f}%", sub=True)
+            + f'<div class="metric-note">≈ {_funding.annualised*100:+.1f}% annualised</div>',
+            unsafe_allow_html=True)
+        _f2.markdown(
+            metric_card("Mark vs Index",
+                        f"{_funding.basis_pct:+.3f}%" if _funding.basis_pct is not None else "—",
+                        sub=True)
+            + '<div class="metric-note">perp premium to spot</div>',
+            unsafe_allow_html=True)
+        _f3.markdown(metric_card("Mark", f"${_funding.mark_price:,.2f}"
+                     if _funding.mark_price else "—"), unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="verdict"><div class="verdict-line">{_funding.crowded_side}.'
+            '</div></div>', unsafe_allow_html=True)
+        st.caption("Live from Binance perpetuals.")
+    else:
+        _cool = cfut_mod.cooldown_remaining()
+        st.info(
+            "Live funding is unavailable right now"
+            + (f" (feed cooling down for {_cool/60:.0f} more minutes after a rate "
+               "limit)." if _cool > 0 else " — the futures feed did not respond.")
+            + " Use the basis calculator below with a futures price you can see on "
+            "your exchange."
+        )
+
+    st.markdown("**Basis calculator** — annualise the carry from any spot/futures pair.")
+    _bc1, _bc2, _bc3 = st.columns(3)
+    _bc_spot = _bc1.number_input(
+        "Spot ($)", min_value=0.0,
+        value=float(_cx_daily.price or 0.0), step=1.0, format="%.2f", key="cx_basis_spot")
+    _bc_fut = _bc2.number_input(
+        "Futures ($)", min_value=0.0,
+        value=float((_cx_daily.price or 0.0) * 1.01), step=1.0, format="%.2f",
+        key="cx_basis_fut")
+    _bc_days = _bc3.number_input(
+        "Days to expiry", min_value=0.1, value=90.0, step=1.0, key="cx_basis_days",
+        help="For a perpetual, use the funding interval in days (8h ≈ 0.33).")
+    _basis = cfut_mod.basis(_bc_spot, _bc_fut, _bc_days)
+    if _basis is not None:
+        _r1, _r2 = st.columns(2)
+        _r1.markdown(
+            metric_card("Basis", f"{_basis.basis_pct:+.2f}%", sub=True)
+            + f'<div class="metric-note">${_basis.absolute:+,.2f} absolute</div>',
+            unsafe_allow_html=True)
+        _r2.markdown(
+            metric_card("Annualised carry", f"{_basis.annualised_pct:+.1f}%", sub=True)
+            + f'<div class="metric-note">{_basis.structure.split("—")[0].strip()}</div>',
+            unsafe_allow_html=True)
+        st.caption(_basis.structure + ".")
+    else:
+        st.caption("Enter a positive spot, futures and days to compute the basis.")
