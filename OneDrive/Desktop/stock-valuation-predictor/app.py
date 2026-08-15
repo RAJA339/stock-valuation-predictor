@@ -71,11 +71,13 @@ from svp.models import (
     valuation as val_mod, explain as explain_mod, dcf as dcf_mod, backtest as bt_mod,
     regime as regime_mod, relative as relative_mod, sizing as sizing_mod,
     derivatives as deriv_mod, crypto_ml as cml_mod,
+    crypto_regime as cregime_mod,
 )
 from svp.analytics import (
     peers as peers_mod, technical as technical_mod, quality as quality_mod,
     screener as screener_mod, indicators as ind_mod, accuracy as acc_mod,
     microstructure as micro_mod, quant as quant_mod,
+    fracdiff as fracdiff_mod, flow as flow_mod,
 )
 from svp.data import intraday as intraday_mod
 from svp import rag as rag_mod
@@ -155,6 +157,22 @@ def get_crypto_forecast_cached(yf_ticker: str, horizon: int = 3):
     if hist is None or hist.empty:
         return None
     return cml_mod.evaluate(hist, horizon=horizon)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_crypto_regime_cached(yf_ticker: str):
+    """Gaussian-HMM regime over frac-diff features, cached — it fits an HMM."""
+    hist = get_market_cached(yf_ticker, 0.0).history
+    if hist is None or hist.empty:
+        return None
+    return cregime_mod.detect(hist)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_crypto_vpin_cached(yf_ticker: str, interval: str, spot: float):
+    """VPIN (bulk-volume classification) on intraday bars."""
+    bars = get_intraday_cached(yf_ticker, interval, spot)
+    return flow_mod.vpin_bvc(bars.df) if bars is not None else None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -2822,6 +2840,96 @@ new TradingView.widget({{
             "about tomorrow — regimes change, and a model that beat the baseline "
             "last year can stop working. Treat a shown call as one input, sized "
             "small, never as a signal to follow blindly."
+        )
+
+    # ── Quant lab (institutional pipeline, the deployable subset) ─────────────
+    st.markdown(theme.section("Quant lab — microstructure &amp; regime", "Institutional"),
+                unsafe_allow_html=True)
+    st.caption(
+        "The buildable core of an institutional pipeline, run on the data this "
+        "app actually has. **Fractional differentiation** makes the price "
+        "stationary without erasing its memory; those features feed a "
+        "**Gaussian-HMM regime** model. **VPIN** (bulk-volume classification) "
+        "estimates order-flow toxicity — the method's authors designed it for "
+        "volume bars, not the Level-2 book, which is exactly why it is honest "
+        "to compute here. True L2 order-flow imbalance, dealer gamma and on-chain "
+        "flows need feeds and infrastructure this deployment does not have — they "
+        "are not faked in."
+    )
+
+    # Fractional differentiation + Gaussian HMM regime (daily history).
+    _ql_close = _cx_daily.history["Close"] if not _cx_daily.history.empty else None
+    if _ql_close is not None and len(_ql_close) >= 200:
+        _ffit = fracdiff_mod.min_d(np.log(_ql_close.astype(float)))
+        if _ffit is not None:
+            _l1, _l2, _l3 = st.columns(3)
+            _l1.markdown(
+                metric_card("Frac-diff order d", f"{_ffit.d:.2f}", sub=True)
+                + '<div class="metric-note">just enough to reach stationarity</div>',
+                unsafe_allow_html=True)
+            _l2.markdown(
+                metric_card("Memory kept", f"{_ffit.memory_retained*100:.0f}%", sub=True)
+                + '<div class="metric-note">vs the raw level</div>',
+                unsafe_allow_html=True)
+            _l3.markdown(
+                metric_card("Lag-1 autocorr", f"{_ffit.acf1_before:.2f}→{_ffit.acf1_after:.2f}",
+                            sub=True)
+                + '<div class="metric-note">trend removed</div>',
+                unsafe_allow_html=True)
+            st.caption(_ffit.reading + ".")
+
+    try:
+        _regime = get_crypto_regime_cached(_coin.yf)
+    except Exception:
+        _regime = None
+    if _regime is not None:
+        st.markdown(
+            f'<div class="verdict"><div class="verdict-line">'
+            f'<span class="section-eyebrow">Gaussian-HMM regime</span><br>'
+            f'<b>{_regime.label}</b> — {_regime.reading}'
+            f'</div></div>', unsafe_allow_html=True)
+    else:
+        st.caption(
+            "The HMM regime needs a longer daily history (and hmmlearn) than is "
+            "available for this coin right now."
+        )
+
+    # VPIN order-flow toxicity (intraday bars).
+    try:
+        _vpin = get_crypto_vpin_cached(_coin.yf, _cx_interval, _cx_daily.price or 0.0)
+    except Exception:
+        _vpin = None
+    st.markdown(theme.section("Order-flow toxicity (VPIN)", ""), unsafe_allow_html=True)
+    if _vpin is None:
+        st.caption(
+            "Not enough intraday volume history to fill the VPIN buckets on this "
+            "coin and interval yet."
+        )
+    else:
+        _p1, _p2 = st.columns([1, 2])
+        _p1.markdown(
+            metric_card("VPIN", f"{_vpin.value:.2f}", sub=True)
+            + f'<div class="metric-note">{_vpin.percentile:.0f}th percentile · '
+            f'{_vpin.n_buckets} buckets</div>',
+            unsafe_allow_html=True)
+        _vcls = "verdict-over" if _vpin.is_toxic else "verdict-inside"
+        _p2.markdown(
+            f'<div class="verdict"><div class="verdict-line">'
+            f'<span class="{_vcls}">{_vpin.label}</span></div></div>',
+            unsafe_allow_html=True)
+        if len(_vpin.series) > 5:
+            fig, ax = plt.subplots(figsize=(9, 2.4))
+            theme.style_axes(fig, ax)
+            ax.plot(_vpin.series.to_numpy(), color=theme.GREEN, lw=1.4)
+            ax.set_ylabel("VPIN"); ax.set_xlabel("volume bucket")
+            st.pyplot(fig, width="stretch"); plt.close(fig)
+        st.caption(
+            "VPIN is the rolling average absolute order imbalance across "
+            "equal-volume buckets, with each bucket's buy/sell split inferred "
+            "from its price move (bulk-volume classification). High and rising "
+            "VPIN is the adverse-selection signal that preceded the 2010 flash "
+            "crash in the original study — read it as flow one-sidedness, not a "
+            "directional call."
         )
 
     # ── Futures & funding ────────────────────────────────────────────────────
