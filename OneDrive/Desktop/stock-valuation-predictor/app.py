@@ -70,7 +70,7 @@ from svp.data import (
 from svp.models import (
     valuation as val_mod, explain as explain_mod, dcf as dcf_mod, backtest as bt_mod,
     regime as regime_mod, relative as relative_mod, sizing as sizing_mod,
-    derivatives as deriv_mod,
+    derivatives as deriv_mod, crypto_ml as cml_mod,
 )
 from svp.analytics import (
     peers as peers_mod, technical as technical_mod, quality as quality_mod,
@@ -146,6 +146,15 @@ def get_global_calibration():
         return {}
     scored = pred_mod.score(preds, lambda t: get_market_cached(t, 0.0).price)
     return pred_mod.global_calibration(scored)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_crypto_forecast_cached(yf_ticker: str, horizon: int = 3):
+    """Walk-forward crypto directional model, cached — it trains several folds."""
+    hist = get_market_cached(yf_ticker, 0.0).history
+    if hist is None or hist.empty:
+        return None
+    return cml_mod.evaluate(hist, horizon=horizon)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -2754,6 +2763,65 @@ new TradingView.widget({{
             "reading above the realized figure means volatility is rising now. The "
             "regime label is relative to this coin's own history, not an absolute "
             "threshold — 60% vol is calm for one coin and a shock for another."
+        )
+
+    # ── ML directional model ─────────────────────────────────────────────────
+    st.markdown(theme.section("ML directional model", "Black box"),
+                unsafe_allow_html=True)
+    st.caption(
+        "A gradient-boosted classifier that predicts the next move's direction — "
+        "the black box you asked for, built the only way it is honest to build "
+        "one. Every accuracy figure below is **out-of-sample**: the series is cut "
+        "into walk-forward folds, each trained on the past and scored on a block "
+        "it never saw. And it is measured against a naive baseline ('always up', "
+        "or repeat the last move), because beating a coin flip is easy in a trend "
+        "and proves nothing — beating the baseline is the real bar."
+    )
+    _fc = None
+    try:
+        _fc = get_crypto_forecast_cached(_coin.yf, 3)
+    except Exception:
+        _fc = None
+
+    if _fc is None:
+        st.info(
+            "Not enough history to train and validate the model on this coin yet "
+            "— it needs roughly a year of daily bars before it will hold folds out."
+        )
+    else:
+        _fm1, _fm2, _fm3 = st.columns(3)
+        _fm1.markdown(
+            metric_card("Out-of-sample accuracy", f"{_fc.hit_rate*100:.1f}%", sub=True)
+            + f'<div class="metric-note">95% CI {_fc.ci_low*100:.0f}–'
+            f'{_fc.ci_high*100:.0f}% · {_fc.n_oos} bars</div>',
+            unsafe_allow_html=True)
+        _fm2.markdown(
+            metric_card("Naive baseline", f"{_fc.baseline_rate*100:.1f}%", sub=True)
+            + '<div class="metric-note">always-up / persistence</div>',
+            unsafe_allow_html=True)
+        _edge_cls = "verdict-under" if _fc.beats_baseline else "verdict-inside"
+        _fm3.markdown(
+            metric_card("Edge vs baseline", f"{_fc.edge_pts:+.1f} pts", sub=True)
+            + f'<span class="{_edge_cls}">'
+            f'{"clears the bar" if _fc.beats_baseline else "within noise"}</span>',
+            unsafe_allow_html=True)
+
+        _v_cls = "verdict-under" if _fc.beats_baseline else "verdict-over"
+        st.markdown(
+            f'<div class="verdict"><div class="verdict-line">{_fc.verdict}.'
+            + (f' <b>Current call: <span class="{_v_cls}">{_fc.call}</span></b> '
+               f'(model probability of up {_fc.prob_up*100:.0f}%).'
+               if _fc.beats_baseline and _fc.prob_up is not None
+               else ' <span class="verdict-tail">No call is shown, because the '
+                    'model has not earned one on this coin.</span>')
+            + '</div></div>', unsafe_allow_html=True)
+
+        st.caption(
+            "This is deliberately not a crystal ball. An out-of-sample edge on "
+            "history is the *precondition* for trusting a model, never a promise "
+            "about tomorrow — regimes change, and a model that beat the baseline "
+            "last year can stop working. Treat a shown call as one input, sized "
+            "small, never as a signal to follow blindly."
         )
 
     # ── Futures & funding ────────────────────────────────────────────────────
