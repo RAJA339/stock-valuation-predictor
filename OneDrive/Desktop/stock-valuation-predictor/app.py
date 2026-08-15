@@ -65,7 +65,7 @@ from svp.data import (
     sec as sec_mod, insider as insider_mod, filings_nlp as nlp_mod,
     options as options_mod, predictions as pred_mod,
     watchlist as watch_mod, calendar as cal_mod, segments as seg_mod,
-    _userdb,
+    crypto as crypto_mod, _userdb,
 )
 from svp.models import (
     valuation as val_mod, explain as explain_mod, dcf as dcf_mod, backtest as bt_mod,
@@ -565,6 +565,7 @@ SECTIONS: list[tuple[str, list[str]]] = [
     ("Risk",      ["Guardrails", "Backtesting", "Options & Futures"]),
     ("Filings",   ["Ask the Filings", "Fundamental Δ", "Segments"]),
     ("Portfolio", ["Watchlist", "Track Record"]),
+    ("Crypto",    []),
     ("Report",    []),
 ]
 
@@ -2537,3 +2538,142 @@ with tab_guard("Microstructure"):
         "opposite of a signal service: to show which patterns survive an honest "
         "confidence interval and which evaporate — because most do."
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CRYPTO — live 24/7 charts and measured technical analysis for major coins
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_guard("Crypto"):
+    st.markdown(theme.section("Live crypto — chart and measured signals", "Crypto"),
+                unsafe_allow_html=True)
+    st.info(
+        "**No intrinsic valuation here, on purpose.** A token has no cash flow, "
+        "no filings and no book value, so DCF, the quantile fair-value range and "
+        "the forensic scores simply do not apply — and inventing a 'fair value' "
+        "for a coin would be the fabricated number this whole app refuses to "
+        "produce. What *does* carry over is everything that reads a price series: "
+        "the live chart, the indicators, and each indicator's **measured** hit "
+        "rate with a confidence interval. Markets here run 24/7, so there is no "
+        "session or overnight gap to reason about."
+    )
+
+    _cc1, _cc2, _cc3 = st.columns([1.4, 1, 1])
+    with _cc1:
+        _coin_label = st.selectbox("Coin", crypto_mod.labels(), index=0, key="crypto_coin")
+    _coin = crypto_mod.by_label(_coin_label) or crypto_mod.coins()[0]
+    with _cc2:
+        _cx_interval = st.radio(
+            "Interval", list(intraday_mod.INTERVALS.keys()),
+            index=2, horizontal=True, key="crypto_interval",
+        )
+    with _cc3:
+        _cx_refresh_label = st.selectbox(
+            "Auto-refresh", ["Off", "5s", "10s", "30s", "60s"], index=2,
+            key="crypto_refresh",
+            help="Refreshes only this block, not the whole app.",
+        )
+    _CX_REFRESH = {"Off": None, "5s": 5, "10s": 10, "30s": 30, "60s": 60}[_cx_refresh_label]
+    _cx_horizon = st.selectbox(
+        "Accuracy horizon (bars forward)", [3, 6, 12, 24], index=1, key="crypto_horizon",
+        help="How far ahead a signal is scored before checking if it was right.",
+    )
+
+    # Live TradingView chart for the coin — inherently 24/7 and streaming.
+    _tv_map = {"5m": "5", "10m": "10", "15m": "15", "30m": "30", "1h": "60"}
+    st.components.v1.html(f"""
+<div class="tradingview-widget-container" style="height:600px">
+  <div id="tv_crypto" style="height:600px"></div>
+</div>
+<script src="https://s3.tradingview.com/tv.js"></script>
+<script>
+new TradingView.widget({{
+  "autosize": true, "symbol": "{_coin.tv}", "interval": "{_tv_map[_cx_interval]}",
+  "timezone": "Etc/UTC", "theme": "dark", "style": "1", "locale": "en",
+  "toolbar_bg": "#161B22", "enable_publishing": false, "hide_side_toolbar": false,
+  "allow_symbol_change": true, "withdateranges": true, "details": true,
+  "studies": ["MASimple@tv-basicstudies", "RSI@tv-basicstudies",
+              "MACD@tv-basicstudies"],
+  "container_id": "tv_crypto"
+}});
+</script>
+""", height=620)
+    st.caption(
+        f"TradingView live feed for **{_coin.tv}**. It streams in your browser, so "
+        "it is always current and needs no market-hours gating — crypto trades "
+        "around the clock."
+    )
+
+    st.divider()
+
+    # Everything below computes on yfinance OHLCV for the coin, reusing the exact
+    # indicator + accuracy pipeline the equity Charts tab uses. Only this block
+    # re-runs on the timer, so the whole app is not recomputed on each tick.
+    _cx_fragment = getattr(st, "fragment", None)
+    _cx_wrap = (lambda fn: _cx_fragment(run_every=_CX_REFRESH)(fn)) \
+        if (_cx_fragment and _CX_REFRESH) else (lambda fn: fn)
+
+    @_cx_wrap
+    def _crypto_view():
+        _cmd = get_market_cached(_coin.yf, 0.0)
+        _spot = _cmd.price or 0.0
+        _bars = get_intraday_cached(_coin.yf, _cx_interval, _spot)
+        _last = _bars.last_price or _spot
+        _chg = _bars.session_change
+
+        _m1, _m2, _m3 = st.columns(3)
+        _m1.markdown(metric_card(f"{_coin.symbol} Price",
+                     f"${_last:,.2f}" if _last else "—"), unsafe_allow_html=True)
+        _m2.markdown(
+            metric_card("Window Change",
+                        f"{_chg*100:+.2f}%" if _chg is not None else "—", sub=True)
+            + f'<div class="metric-note">over the visible {_cx_interval} window</div>',
+            unsafe_allow_html=True)
+        _m3.markdown(
+            metric_card("Feed", "LIVE" if _bars.is_live else "SYNTHETIC", sub=True)
+            + f'<div class="metric-note">{_bars.source}</div>',
+            unsafe_allow_html=True)
+
+        st.markdown(theme.section("Measured signal accuracy", ""), unsafe_allow_html=True)
+        st.caption(
+            "Each indicator's hit rate on this coin's own recent bars, with a "
+            "Wilson interval. Read the interval: when it straddles 50%, the "
+            "signal is no better than a coin flip on this coin, and the verdict "
+            "says so. This is the honest 'output' — it refuses to dress up noise."
+        )
+        _acc = get_accuracy_cached(_coin.yf, _cx_interval, _spot, int(_cx_horizon))
+        if not _acc:
+            st.warning(
+                "Not enough bars to measure accuracy yet — try a longer interval, "
+                "or the live feed may be briefly rate-limited."
+            )
+        else:
+            _asum = acc_mod.summary(_acc)
+            _s1, _s2, _s3 = st.columns(3)
+            _s1.markdown(metric_card("Indicators measured", f"{_asum['measured']}"),
+                         unsafe_allow_html=True)
+            _s2.markdown(
+                metric_card("Better than chance", f"{_asum['better_than_chance']}", sub=True)
+                + '<div class="metric-note">interval clears 50%</div>',
+                unsafe_allow_html=True)
+            if _asum["best"]:
+                _s3.markdown(
+                    metric_card("Best", f"{_asum['best_rate']*100:.0f}%", sub=True)
+                    + f'<div class="metric-note">{_asum["best"]}</div>',
+                    unsafe_allow_html=True)
+            st.dataframe(acc_mod.as_frame(_acc), width="stretch", hide_index=True)
+
+            if _asum["better_than_chance"] == 0:
+                st.info(
+                    "On this coin, over this window, **no indicator beats a coin "
+                    "flip** once the confidence interval is honest. That is a "
+                    "finding, not a failure — most short-horizon signals on a "
+                    "24/7 market do not survive measurement."
+                )
+
+    _crypto_view()
+
+    if _CX_REFRESH and not _cx_fragment:
+        st.caption(
+            "Auto-refresh needs Streamlit 1.38+ for `st.fragment`; this build "
+            "updates when you interact with the page."
+        )
