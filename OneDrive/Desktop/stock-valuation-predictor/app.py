@@ -65,7 +65,8 @@ from svp.data import (
     sec as sec_mod, insider as insider_mod, filings_nlp as nlp_mod,
     options as options_mod, predictions as pred_mod,
     watchlist as watch_mod, calendar as cal_mod, segments as seg_mod,
-    crypto as crypto_mod, crypto_futures as cfut_mod, _userdb,
+    crypto as crypto_mod, crypto_futures as cfut_mod,
+    crypto_options as copt_mod, _userdb,
 )
 from svp.models import (
     valuation as val_mod, explain as explain_mod, dcf as dcf_mod, backtest as bt_mod,
@@ -146,6 +147,12 @@ def get_global_calibration():
         return {}
     scored = pred_mod.score(preds, lambda t: get_market_cached(t, 0.0).price)
     return pred_mod.global_calibration(scored)
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def get_crypto_options_cached(currency: str):
+    """Live Deribit option chain (BTC/ETH), cached briefly — IV and OI move."""
+    return copt_mod.get_chain(currency)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -2823,6 +2830,105 @@ new TradingView.widget({{
             "last year can stop working. Treat a shown call as one input, sized "
             "small, never as a signal to follow blindly."
         )
+
+    # ── Options: skew & dealer GEX (Deribit) ─────────────────────────────────
+    st.markdown(theme.section("Options — skew &amp; dealer gamma", "Deribit"),
+                unsafe_allow_html=True)
+    if _coin.symbol not in ("BTC", "ETH"):
+        st.info(
+            "Listed options liquidity is effectively BTC and ETH only, so skew "
+            "and dealer gamma are shown for those two coins. Select BTC or ETH "
+            "to see them."
+        )
+    else:
+        st.caption(
+            "Live from Deribit, where essentially all crypto-options liquidity "
+            "sits. **Skew** is the implied-vol smile and its 25-delta risk "
+            "reversal (OTM put IV minus call IV) — positive means the market pays "
+            "up for downside protection. **Dealer gamma (GEX)** aggregates option "
+            "gamma by open interest: its sign says whether market-makers dampen "
+            "moves (positive) or amplify them (negative), and the flip level is "
+            "where that behaviour changes."
+        )
+        try:
+            _chain = get_crypto_options_cached(_coin.symbol)
+        except Exception:
+            _chain = None
+
+        if not _chain:
+            _ocool = copt_mod.cooldown_remaining()
+            st.info(
+                "Deribit options data is unavailable right now"
+                + (f" (feed cooling down {_ocool/60:.0f} more min after a rate "
+                   "limit)." if _ocool > 0 else " — the feed did not respond.")
+                + " Deribit is also geo-restricted from some hosts, which can "
+                "block this on a shared-IP deployment."
+            )
+        else:
+            _skew = copt_mod.nearest_expiry_skew(_chain)
+            _gex = copt_mod.dealer_gex(_chain)
+
+            if _skew is not None:
+                _sk1, _sk2, _sk3 = st.columns(3)
+                _sk1.markdown(
+                    metric_card("ATM IV", f"{_skew.atm_iv*100:.0f}%", sub=True)
+                    + f'<div class="metric-note">~{_skew.expiry_days:.0f}d expiry</div>',
+                    unsafe_allow_html=True)
+                _rr_cls = "verdict-over" if _skew.rr_25 > 0 else "verdict-under"
+                _sk2.markdown(
+                    metric_card("25Δ risk reversal", f"{_skew.rr_25*100:+.1f}", sub=True)
+                    + '<div class="metric-note">put IV − call IV, vol pts</div>',
+                    unsafe_allow_html=True)
+                _sk3.markdown(
+                    metric_card("Spot", f"${_skew.spot:,.0f}"), unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="verdict"><div class="verdict-line">'
+                    f'<span class="{_rr_cls}">{_skew.reading}</span></div></div>',
+                    unsafe_allow_html=True)
+                if len(_skew.strikes) > 2:
+                    fig, ax = plt.subplots(figsize=(9, 2.8))
+                    theme.style_axes(fig, ax)
+                    ax.plot(_skew.strikes, [v*100 for v in _skew.call_iv],
+                            color=theme.GREEN, marker="o", ms=3, label="Call IV")
+                    ax.plot(_skew.strikes, [v*100 for v in _skew.put_iv],
+                            color=theme.CHAMPAGNE, marker="o", ms=3, label="Put IV")
+                    ax.axvline(_skew.spot, color=theme.FAINT, lw=1, ls="--")
+                    ax.set_xlabel("Strike"); ax.set_ylabel("Implied vol (%)")
+                    ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
+                    st.pyplot(fig, width="stretch"); plt.close(fig)
+
+            if _gex is not None:
+                st.markdown(theme.section("Dealer gamma exposure", ""),
+                            unsafe_allow_html=True)
+                _g1, _g2 = st.columns([1, 2])
+                _gcls = "verdict-under" if _gex.total > 0 else "verdict-over"
+                _g1.markdown(
+                    metric_card("GEX regime", _gex.regime, sub=True)
+                    + (f'<div class="metric-note">flip ~{_gex.flip_strike:,.0f}</div>'
+                       if _gex.flip_strike else ''),
+                    unsafe_allow_html=True)
+                _g2.markdown(
+                    f'<div class="verdict"><div class="verdict-line">'
+                    f'<span class="{_gcls}">{_gex.reading}</span></div></div>',
+                    unsafe_allow_html=True)
+                if len(_gex.by_strike) > 2:
+                    fig, ax = plt.subplots(figsize=(9, 2.8))
+                    theme.style_axes(fig, ax)
+                    _ks = [k for k, _ in _gex.by_strike]
+                    _gs = [v for _, v in _gex.by_strike]
+                    _cols = [theme.GREEN if v >= 0 else theme.RED for v in _gs]
+                    ax.bar(_ks, _gs, color=_cols,
+                           width=(max(_ks) - min(_ks)) / max(len(_ks) * 1.5, 1))
+                    ax.axvline(_gex.spot, color=theme.FAINT, lw=1, ls="--", label="Spot")
+                    ax.axhline(0, color=theme.MUTED, lw=0.8)
+                    ax.set_xlabel("Strike"); ax.set_ylabel("Net dealer gamma ($/1%)")
+                    st.pyplot(fig, width="stretch"); plt.close(fig)
+                st.caption(
+                    "The sign and the flip level are the robust readings. The "
+                    "dollar magnitude assumes the standard dealer-positioning "
+                    "convention (long call gamma, short put gamma), so treat the "
+                    "notional as indicative, not exact."
+                )
 
     # ── Futures & funding ────────────────────────────────────────────────────
     st.markdown(theme.section("Perpetual futures — funding &amp; basis", "Futures"),
