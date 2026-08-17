@@ -1,0 +1,211 @@
+# Job definitions for the Asset Bundle.
+#
+# Three jobs, split by cadence rather than by layer:
+#
+#   streaming_ingest  - runs forever (Bronze + Silver streams)
+#   batch_curation    - hourly (SCD2 dimension, Gold aggregates, vector sync)
+#   governance_audit  - daily (drift assertions against Unity Catalog)
+#
+# Mixing a continuous stream and an hourly batch into one job means the batch
+# can never run: the job is already RUNNING.
+
+resources:
+  jobs:
+    streaming_ingest:
+      name: "[${bundle.target}] genai-lakehouse :: streaming ingest"
+      description: >-
+        Continuous Bronze ingest (Auto Loader + Kinesis) and the Silver
+        streams that consume them.
+
+      job_clusters:
+        - job_cluster_key: streaming
+          new_cluster:
+            spark_version: 15.4.x-scala2.12
+            node_type_id: ${var.node_type}
+            num_workers: ${var.streaming_workers}
+            data_security_mode: SINGLE_USER
+            runtime_engine: PHOTON
+            aws_attributes:
+              first_on_demand: 1
+              # Streaming tolerates spot loss (the checkpoint replays), but the
+              # driver must not be evicted -- hence first_on_demand: 1.
+              availability: SPOT_WITH_FALLBACK
+              instance_profile_arn: ${var.instance_profile_arn}
+              ebs_volume_type: GENERAL_PURPOSE_SSD
+              ebs_volume_count: 1
+              ebs_volume_size: 100
+            spark_conf:
+              spark.databricks.delta.preview.enabled: "true"
+              spark.sql.streaming.stateStore.providerClass: >-
+                com.databricks.sql.streaming.state.RocksDBStateStoreProvider
+            custom_tags:
+              project: genai-lakehouse
+              pipeline: streaming_ingest
+
+      tasks:
+        - task_key: bronze_documents
+          job_cluster_key: streaming
+          python_wheel_task:
+            package_name: genai_lakehouse_pipelines
+            entry_point: bronze_documents
+            parameters: ["--conf", "${workspace.file_path}/conf/${bundle.target}.json"]
+          libraries:
+            - whl: ../dist/*.whl
+
+        - task_key: bronze_market_events
+          job_cluster_key: streaming
+          python_wheel_task:
+            package_name: genai_lakehouse_pipelines
+            entry_point: bronze_market_events
+            parameters: ["--conf", "${workspace.file_path}/conf/${bundle.target}.json"]
+          libraries:
+            - whl: ../dist/*.whl
+
+        - task_key: silver_documents
+          depends_on:
+            - task_key: bronze_documents
+          job_cluster_key: streaming
+          python_wheel_task:
+            package_name: genai_lakehouse_pipelines
+            entry_point: silver_documents
+            parameters: ["--conf", "${workspace.file_path}/conf/${bundle.target}.json"]
+          libraries:
+            - whl: ../dist/*.whl
+
+        - task_key: silver_market_events
+          depends_on:
+            - task_key: bronze_market_events
+          job_cluster_key: streaming
+          python_wheel_task:
+            package_name: genai_lakehouse_pipelines
+            entry_point: silver_market_events
+            parameters: ["--conf", "${workspace.file_path}/conf/${bundle.target}.json"]
+          libraries:
+            - whl: ../dist/*.whl
+
+      # A streaming job that restarts unboundedly on a poison-pill record turns
+      # into a crash loop that burns compute all weekend. Two retries, then page.
+      max_concurrent_runs: 1
+      health:
+        rules:
+          - metric: RUN_DURATION_SECONDS
+            op: GREATER_THAN
+            value: 604800 # 7 days -- restart weekly to pick up library updates
+
+      email_notifications:
+        on_failure: ["data-platform-oncall@example.com"]
+
+    batch_curation:
+      name: "[${bundle.target}] genai-lakehouse :: batch curation"
+      description: SCD2 reference load, Gold aggregates and vector index sync.
+
+      schedule:
+        quartz_cron_expression: "0 15 * * * ?"
+        timezone_id: UTC
+        # Bundle interpolation resolves references only -- it has no
+        # conditional expression -- so the per-target value is a variable.
+        pause_status: ${var.schedule_pause_status}
+
+      job_clusters:
+        - job_cluster_key: batch
+          new_cluster:
+            spark_version: 15.4.x-scala2.12
+            node_type_id: ${var.node_type}
+            autoscale:
+              min_workers: 2
+              max_workers: 8
+            data_security_mode: SINGLE_USER
+            runtime_engine: PHOTON
+            aws_attributes:
+              first_on_demand: 1
+              availability: SPOT_WITH_FALLBACK
+              instance_profile_arn: ${var.instance_profile_arn}
+            custom_tags:
+              project: genai-lakehouse
+              pipeline: batch_curation
+
+      tasks:
+        - task_key: instrument_scd2
+          job_cluster_key: batch
+          python_wheel_task:
+            package_name: genai_lakehouse_pipelines
+            entry_point: instrument_scd2
+            parameters:
+              - "--conf"
+              - "${workspace.file_path}/conf/${bundle.target}.json"
+              - "--source"
+              - "${var.landing_path}/reference/instruments"
+          libraries:
+            - whl: ../dist/*.whl
+
+        - task_key: gold_aggregates
+          depends_on:
+            - task_key: instrument_scd2
+          job_cluster_key: batch
+          python_wheel_task:
+            package_name: genai_lakehouse_pipelines
+            entry_point: gold_aggregates
+            parameters: ["--conf", "${workspace.file_path}/conf/${bundle.target}.json"]
+          libraries:
+            - whl: ../dist/*.whl
+
+        - task_key: vector_index_sync
+          depends_on:
+            - task_key: gold_aggregates
+          job_cluster_key: batch
+          python_wheel_task:
+            package_name: genai_lakehouse_pipelines
+            entry_point: vector_index
+            parameters:
+              - "--conf"
+              - "${workspace.file_path}/conf/${bundle.target}.json"
+              - "--wait"
+          libraries:
+            - whl: ../dist/*.whl
+
+        # No job_cluster_key: a sql_task runs on a SQL warehouse, and giving it
+        # a job cluster as well is rejected at deploy time.
+        - task_key: optimize_and_vacuum
+          depends_on:
+            - task_key: gold_aggregates
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../../governance/05_maintenance.sql
+
+      max_concurrent_runs: 1
+      email_notifications:
+        on_failure: ["data-platform-oncall@example.com"]
+
+    governance_audit:
+      name: "[${bundle.target}] genai-lakehouse :: governance audit"
+      description: Fails when masking, ownership or CDF drift from the declared policy.
+
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"
+        timezone_id: UTC
+        pause_status: UNPAUSED
+
+      tasks:
+        - task_key: assert_governance
+          new_cluster:
+            spark_version: 15.4.x-scala2.12
+            node_type_id: ${var.node_type}
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.master: "local[*]"
+            custom_tags:
+              project: genai-lakehouse
+              pipeline: governance_audit
+          spark_python_task:
+            python_file: ../../governance/apply.py
+            parameters:
+              - "--catalog"
+              - "${var.catalog}"
+              - "--environment"
+              - "${bundle.target}"
+              - "--assert"
+
+      email_notifications:
+        on_failure: ["data-governance@example.com"]

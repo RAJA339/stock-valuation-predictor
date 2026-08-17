@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genai-lakehouse-pipelines"
+version = "1.0.0"
+description = "Real-Time GenAI Lakehouse & Vector Search platform on AWS + Databricks"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+
+# pyspark and delta-spark are intentionally NOT runtime dependencies: they are
+# provided by the Databricks Runtime, and shipping a second copy inside the
+# wheel is the fastest way to a classpath conflict on a job cluster.
+dependencies = [
+    "databricks-sdk>=0.29.0",
+    "databricks-vectorsearch>=0.40",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pyspark==3.5.6",
+    "delta-spark==3.2.0",
+    "databricks-sql-connector>=3.0.0",
+    "pyyaml>=6.0",
+    "tomli>=2.0; python_version < '3.11'",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+]
+
+# Entry points referenced by pipelines/resources/jobs.yml. Keeping the job
+# definition pointed at a named entry point rather than a file path means a
+# module can be moved without editing the bundle.
+[project.scripts]
+bronze_documents = "pipelines.bronze.autoloader_documents:main"
+bronze_market_events = "pipelines.bronze.kinesis_market_events:main"
+silver_documents = "pipelines.silver.documents_silver:main"
+silver_market_events = "pipelines.silver.market_events_silver:main"
+instrument_scd2 = "pipelines.silver.instrument_scd2:main"
+gold_aggregates = "pipelines.gold.gold_aggregates:main"
+vector_index = "pipelines.gold.vector_index:main"
+
+[tool.setuptools.packages.find]
+include = ["pipelines*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: requires a live Databricks workspace; skipped by default",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pyspark.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = [
+    # `== True` is required by the Spark Column API; `is True` is a Python bool.
+    "E712",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+[tool.coverage.run]
+source = ["pipelines", "governance"]
+omit = ["*/resources/*"]
