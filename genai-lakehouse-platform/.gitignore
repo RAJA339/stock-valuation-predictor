@@ -1,0 +1,34 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+# Never commit a tfvars that carries real ids or secrets; envs/*/terraform.tfvars
+# in this repo are placeholders and are tracked deliberately.
+*.auto.tfvars
+override.tf
+override.tf.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+
+# Databricks
+.databricks/
+conf/*.json
+!conf/example.json
+
+# Spark
+spark-warehouse/
+metastore_db/
+derby.log
