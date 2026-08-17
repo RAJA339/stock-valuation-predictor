@@ -135,8 +135,17 @@ jobs:
         run: terraform validate -no-color
 
       - name: Validate each child module
+        # A module declaring `configuration_aliases` cannot be validated as a
+        # ROOT module: its aliased providers are supplied by the calling module,
+        # so standalone validation fails with "Provider configuration not
+        # present". Those modules are already covered by "Validate root module"
+        # above, which instantiates them through a `providers = {}` block.
         run: |
           for module in modules/*/; do
+            if grep -rq 'configuration_aliases' "${module}"; then
+              echo "::notice::skipping ${module} - validated via the root module (declares configuration_aliases)"
+              continue
+            fi
             echo "::group::validate ${module}"
             terraform -chdir="${module}" init -backend=false -input=false
             terraform -chdir="${module}" validate -no-color
