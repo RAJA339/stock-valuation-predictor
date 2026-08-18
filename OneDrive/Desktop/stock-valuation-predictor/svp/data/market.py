@@ -99,7 +99,11 @@ def _from_yfinance(ticker: str, period: str) -> Optional[MarketData]:
             industry=info.get("industry"),
             name=info.get("shortName") or info.get("longName") or ticker,
             currency=info.get("currency", "USD"),
-            history=hist[["Open", "High", "Low", "Close"]],
+            # Volume rides along when the source provides it — the chart
+            # workspace and liquidity studies use it; every consumer selects
+            # columns by name, so its presence costs nothing elsewhere.
+            history=hist[[c for c in ("Open", "High", "Low", "Close", "Volume")
+                          if c in hist.columns]],
             source="yfinance",
         )
     except Exception:

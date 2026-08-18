@@ -78,8 +78,9 @@ from svp.analytics import (
     peers as peers_mod, technical as technical_mod, quality as quality_mod,
     screener as screener_mod, indicators as ind_mod, accuracy as acc_mod,
     microstructure as micro_mod, quant as quant_mod,
-    fracdiff as fracdiff_mod, flow as flow_mod,
+    fracdiff as fracdiff_mod, flow as flow_mod, snapshot as snap_mod,
 )
+from svp import lwchart as lwc_mod
 from svp.data import intraday as intraday_mod
 from svp import rag as rag_mod
 from svp import reports, charts
@@ -618,7 +619,7 @@ st.divider()
 # arithmetic and worse groups. The grouping is by what a reader wants, not by
 # what the code shares.
 SECTIONS: list[tuple[str, list[str]]] = [
-    ("Market",    ["Charts", "Execution & Timing", "Microstructure"]),
+    ("Market",    ["Chart Studio", "Charts", "Execution & Timing", "Microstructure"]),
     ("Value",     ["Valuation", "Explainability", "DCF & Scenario", "Peers", "Screener"]),
     ("Risk",      ["Guardrails", "Backtesting", "Options & Futures"]),
     ("Filings",   ["Ask the Filings", "Fundamental Δ", "Segments"]),
@@ -688,6 +689,151 @@ def tab_guard(label: str):
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — CHARTS (TradingView + native candles + measured indicator accuracy)
 # ══════════════════════════════════════════════════════════════════════════════
+with tab_guard("Chart Studio"):
+    # The long-horizon workspace: TradingView's Lightweight Charts engine with
+    # the model's fair-value band drawn on the price axis. The intraday "Charts"
+    # pane answers "what is it doing right now"; this one answers "where does
+    # the price sit against what it may be worth" — the app's core question.
+    _hist = md.history
+    if _hist is None or _hist.empty or len(_hist) < lwc_mod.MIN_BARS:
+        st.info("Not enough daily history to chart this name honestly.")
+    else:
+        cs1, cs2, cs3, cs4 = st.columns([1.6, 1.1, 1.2, 1.1])
+        with cs1:
+            _tf = st.radio("Range", ["3M", "6M", "YTD", "1Y", "2Y", "5Y", "10Y"],
+                           index=3, horizontal=True, key="cs_tf")
+        with cs2:
+            _kind_label = st.radio("Style", ["Candles", "Line", "Area"],
+                                   horizontal=True, key="cs_kind")
+        with cs3:
+            _preset = st.selectbox(
+                "Indicator preset",
+                ["Long-term investor", "Trend following", "Swing", "Momentum",
+                 "Clean chart"],
+                key="cs_preset",
+                help="Which studies draw on the chart. Presets only change what "
+                     "is displayed — nothing here alters the valuation.")
+        with cs4:
+            _log = st.toggle("Log scale", value=_tf in ("5Y", "10Y"), key="cs_log")
+
+        ov1, ov2 = st.columns([1.2, 2.2])
+        with ov1:
+            _show_val = st.toggle(
+                "Valuation overlay", value=True, key="cs_val",
+                help="Draws the model's bear / base / bull estimates and your "
+                     "margin-of-safety threshold as levels on the price axis. "
+                     "These are scenario-based estimates, not predictions.")
+        with ov2:
+            _mos_pct = st.slider(
+                "Margin of safety (%)", 0, 50, 25, 5, key="cs_mos",
+                help="The discount below the base estimate you want before a "
+                     "price counts as a buy-zone for you. A wider margin "
+                     "demands more compensation for being wrong.") \
+                if _show_val else 25
+
+        # Slice by range; indicators are computed on the FULL history first so
+        # a 200-day average has real values on day one of a 3-month window.
+        _close_full = _hist["Close"].astype(float)
+        _bars = {"3M": 63, "6M": 126, "1Y": 252, "2Y": 504,
+                 "5Y": 1260, "10Y": None}.get(_tf)
+        if _tf == "YTD":
+            _win = _hist[_hist.index >= pd.Timestamp(pd.Timestamp.now().year, 1, 1,
+                                                     tz=_hist.index.tz)]
+            if len(_win) < lwc_mod.MIN_BARS:
+                _win = _hist.tail(63)
+        else:
+            _win = _hist if _bars is None else _hist.tail(_bars)
+
+        _PRESETS = {
+            "Long-term investor": {"SMA 50": ("sma", 50), "SMA 200": ("sma", 200)},
+            "Trend following": {"EMA 20": ("ema", 20), "EMA 50": ("ema", 50)},
+            "Swing": {"SMA 20": ("sma", 20), "SMA 50": ("sma", 50)},
+            "Momentum": {"EMA 12": ("ema", 12), "EMA 26": ("ema", 26)},
+            "Clean chart": {},
+        }
+        _ovl = {}
+        for _nm, (_kd, _n) in _PRESETS[_preset].items():
+            if len(_close_full) >= _n:
+                _ovl[_nm] = (_close_full.rolling(_n).mean() if _kd == "sma"
+                             else _close_full.ewm(span=_n, adjust=False).mean())
+        _rsi_series = (snap_mod._rsi(_close_full)
+                       if _preset != "Clean chart" else None)
+
+        _zones = None
+        if _show_val and result is not None:
+            _zones = lwc_mod.FairValueZones(
+                bear=result.low, base=result.point, bull=result.high,
+                mos=result.point * (1 - _mos_pct / 100) if _mos_pct else None,
+            )
+
+        _built = lwc_mod.build_chart_html(
+            _win,
+            kind={"Candles": "candles", "Line": "line", "Area": "area"}[_kind_label],
+            overlays=_ovl, rsi=_rsi_series, zones=_zones, log_scale=_log,
+        )
+        if _built is None:
+            st.info(f"The {_tf} window holds too few bars to chart — "
+                    "pick a longer range.")
+        else:
+            st.components.v1.html(_built.html, height=_built.height)
+            _asof = _hist.index[-1]
+            st.caption(
+                f"Daily bars through {pd.Timestamp(_asof).strftime('%b %d, %Y')} · "
+                f"{md.source} · valuation levels are estimates from this app's "
+                "models, not price targets. Educational use only — not financial "
+                "advice.")
+
+        # ── Technical snapshot ───────────────────────────────────────────────
+        _snap = snap_mod.compute(_hist)
+        if _snap is not None:
+            st.markdown(theme.section("Technical snapshot", "READ OF THE TAPE"),
+                        unsafe_allow_html=True)
+            t1, t2, t3, t4 = st.columns(4)
+            _trend_cls = {"Bullish": "signal-buy", "Bearish": "signal-sell",
+                          "Neutral": "signal-hold"}[_snap.trend]
+            t1.markdown(
+                f'<div class="metric-card"><div class="metric-label">Trend</div>'
+                f'<div class="{_trend_cls}">{_snap.trend}</div></div>',
+                unsafe_allow_html=True)
+            t2.markdown(metric_card(
+                "Momentum", f"{_snap.momentum}"), unsafe_allow_html=True)
+            t3.markdown(metric_card(
+                "RSI", f"{_snap.rsi:.0f} · {_snap.rsi_status}"
+                if _snap.rsi is not None else "—"), unsafe_allow_html=True)
+            t4.markdown(metric_card(
+                "Alignment score", f"{_snap.score}/100"), unsafe_allow_html=True)
+
+            u1, u2, u3, u4 = st.columns(4)
+            u1.markdown(metric_card(
+                "Nearest support",
+                f"${_snap.support:,.2f}" if _snap.support else "—", sub=True),
+                unsafe_allow_html=True)
+            u2.markdown(metric_card(
+                "Nearest resistance",
+                f"${_snap.resistance:,.2f}" if _snap.resistance else "—", sub=True),
+                unsafe_allow_html=True)
+            u3.markdown(metric_card(
+                "Volatility",
+                f"{_snap.volatility}"
+                + (f" · ATR {_snap.atr_pct:.1f}%" if _snap.atr_pct else ""),
+                sub=True), unsafe_allow_html=True)
+            u4.markdown(metric_card(
+                "Relative volume",
+                f"{_snap.rel_volume:.1f}× 20-day avg"
+                if _snap.rel_volume else "—", sub=True), unsafe_allow_html=True)
+
+            st.markdown(f"_{_snap.narrative}_")
+            with st.expander("How the alignment score is built"):
+                st.markdown(
+                    "Weighted components — trend 35%, moving-average stacking "
+                    "25%, momentum 25%, RSI position 15%. The score measures "
+                    "how much the technical readings **agree with each other**, "
+                    "not the probability of profit.")
+                st.dataframe(pd.DataFrame(
+                    [{"Component": k, "Reading (0–100)": v}
+                     for k, v in _snap.components.items()]),
+                    hide_index=True, use_container_width=True)
+
 with tab_guard("Charts"):
     c1, c2, c3 = st.columns([1.4, 1, 1])
     with c1:
