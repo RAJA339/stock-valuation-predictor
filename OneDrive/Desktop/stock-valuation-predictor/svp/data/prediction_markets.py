@@ -30,8 +30,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-_URL = ("https://gamma-api.polymarket.com/markets"
-        "?active=true&closed=false&limit=150&order=volumeNum&ascending=false")
+_BASE = "https://gamma-api.polymarket.com/markets"
+_PAGE_LIMIT = 500
+_MAX_PAGES = 4
 _HEADERS = {"User-Agent": "StockValuationPredictor/1.0 (educational)"}
 _TIMEOUT = 12
 
@@ -158,39 +159,80 @@ def keywords_for(symbol: str, label: str = "") -> list[str]:
 
 def filter_markets(raw: list[dict], keywords: list[str],
                    max_n: int = 8) -> list[Market]:
-    """Parse, keep questions matching any keyword, largest volume first."""
+    """Parse, keep matches on question *or* slug, largest volume first.
+
+    Slugs are searched too because a question's wording and its slug often
+    differ ("Will BTC…" vs "bitcoin-above-150k"); hyphens become spaces so
+    word-ish keywords match either form.
+    """
     out = []
     for d in raw or []:
         m = parse_market(d)
         if m is None:
             continue
-        q = " " + m.question.lower() + " "
-        if any(k.lower() in q for k in keywords):
+        slug = str((d or {}).get("slug") or "").replace("-", " ") \
+            if isinstance(d, dict) else ""
+        hay = " " + m.question.lower() + " " + slug.lower() + " "
+        if any(k.lower() in hay for k in keywords):
             out.append(m)
     out.sort(key=lambda m: -m.volume)
     return out[:max_n]
 
 
-def fetch_markets() -> Optional[list[dict]]:
-    """The raw active-market list from Gamma, or ``None`` (breaker open too)."""
+def _get_page(offset: int) -> list:
+    """One page of active markets from Gamma. Raises on transport errors."""
+    import requests
+
+    r = requests.get(
+        f"{_BASE}?active=true&closed=false&limit={_PAGE_LIMIT}"
+        f"&offset={offset}&volume_num_min=1000",
+        headers=_HEADERS, timeout=_TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    return data if isinstance(data, list) else []
+
+
+def fetch_markets(page_fn=None) -> Optional[list[dict]]:
+    """
+    Active markets from Gamma across several pages, or ``None``.
+
+    Paginates rather than trusting any server-side ordering: the volume
+    leaderboard is dominated by sports and politics, so "the top 150" can
+    legitimately contain zero crypto questions — the original bug. A failure
+    mid-scan keeps the pages already fetched (a partial scan of real data
+    beats none) and still trips the breaker for the next caller; a failure
+    on the first page returns ``None``.
+    """
     if cooldown_remaining() > 0:
         return None
-    try:
-        import requests
+    fetch = page_fn or _get_page
+    out: list[dict] = []
+    for page in range(_MAX_PAGES):
+        try:
+            batch = fetch(page * _PAGE_LIMIT)
+        except Exception as exc:
+            _trip(exc)
+            return out if out else None
+        out.extend(batch)
+        if len(batch) < _PAGE_LIMIT:
+            break
+    return out
 
-        r = requests.get(_URL, headers=_HEADERS, timeout=_TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
-        return data if isinstance(data, list) else None
-    except Exception as exc:
-        _trip(exc)
-        return None
+
+@dataclass
+class Scan:
+    """What a coin scan actually looked at, so an empty result is checkable."""
+    markets: list[Market]
+    scanned: int
 
 
 def crypto_markets(symbol: str, label: str = "",
-                   max_n: int = 8) -> Optional[list[Market]]:
-    """Top crypto prediction markets for one coin, or ``None`` when unreachable."""
+                   max_n: int = 8) -> Optional[Scan]:
+    """Top prediction markets for one coin, or ``None`` when unreachable."""
     raw = fetch_markets()
     if raw is None:
         return None
-    return filter_markets(raw, keywords_for(symbol, label), max_n=max_n)
+    return Scan(
+        markets=filter_markets(raw, keywords_for(symbol, label), max_n=max_n),
+        scanned=len(raw),
+    )

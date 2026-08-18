@@ -3712,19 +3712,20 @@ new TradingView.widget({{
         "loses money when it is wrong. Read-only: this app displays "
         "probabilities and never places bets. Each market resolves by its "
         "own rules — follow the link before leaning on a number.")
-    _pmkts = get_prediction_markets_cached(_coin.symbol, _coin_label)
-    if _pmkts is None:
+    _pscan = get_prediction_markets_cached(_coin.symbol, _coin_label)
+    if _pscan is None:
         _pm_cool = pm_mod.cooldown_remaining()
         st.info(
             "Polymarket is unreachable from this deployment right now"
             + (f" (feed cooling down for {_pm_cool/60:.0f} more minutes)."
                if _pm_cool > 0 else ".")
             + " Nothing is shown rather than a stale or invented probability.")
-    elif not _pmkts:
+    elif not _pscan.markets:
         st.info(f"No active Yes/No markets mentioning {_coin.symbol} were "
-                "found among Polymarket's most-traded questions right now.")
+                f"found across the {_pscan.scanned:,} active Polymarket "
+                "markets scanned just now.")
     else:
-        for _mkt in _pmkts:
+        for _mkt in _pscan.markets:
             _pm1, _pm2 = st.columns([2.6, 1])
             _thin = (' · <span class="verdict-over">thin book — treat with '
                      'care</span>' if _mkt.is_thin else "")
@@ -3737,6 +3738,8 @@ new TradingView.widget({{
                 "Crowd says", f"{_mkt.yes_prob * 100:.0f}% yes"),
                 unsafe_allow_html=True)
         st.caption(
-            "Sorted by volume — heavier markets carry more information. "
-            "Probabilities are the crowd's, not this app's models'; when the "
-            "two disagree, that disagreement is itself the finding.")
+            f"Top of {len(_pscan.markets)} matches across "
+            f"{_pscan.scanned:,} active markets scanned, sorted by volume — "
+            "heavier markets carry more information. Probabilities are the "
+            "crowd's, not this app's models'; when the two disagree, that "
+            "disagreement is itself the finding.")
