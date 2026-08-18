@@ -58,7 +58,7 @@ jobs:
 
       - name: Byte-compile all sources
         run: |
-          python -m py_compile app.py
+          python -m py_compile app.py pages/home.py pages/research.py
           python -m compileall -q svp ci
 
       - name: Import the svp package

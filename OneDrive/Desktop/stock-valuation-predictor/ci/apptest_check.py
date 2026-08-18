@@ -1,9 +1,12 @@
 """
 Streamlit AppTest check (CI).
 
-Boots app.py through Streamlit's testing harness, seeds a fully-formed analysis
-(so every tab renders without needing network fundamentals), and asserts the
-script runs with no uncaught exceptions. Exits non-zero on failure.
+Boots the st.navigation shell (app.py) through Streamlit's testing harness.
+The Research terminal lives at pages/research.py, so pane checks switch to it
+first; identity checks run on whatever page loads because the entry script
+owns the ?id= key. Seeds a fully-formed analysis (so every pane renders
+without needing network fundamentals) and asserts the script runs with no
+uncaught exceptions. Exits non-zero on failure.
 """
 
 import os
@@ -81,8 +84,12 @@ def build_seed_analysis():
     }
 
 
+RESEARCH = "pages/research.py"
+
+
 def _run(seed):
     at = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+    at.switch_page(RESEARCH)
     at.session_state["analysis"] = seed
     at.run()
     return at
@@ -190,6 +197,7 @@ def check_ledger_populated(seed):
     conn.commit()
 
     at = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+    at.switch_page(RESEARCH)
     at.session_state["analysis"] = seed
     at.session_state["ledger_key"] = key
     at.run()
@@ -238,6 +246,7 @@ def check_watchlist_populated(seed):
     C.next_filing = lambda t: C.Event(t, "10-Q", today + dt.timedelta(days=40), True)
     try:
         at = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+        at.switch_page(RESEARCH)
         at.session_state["analysis"] = seed
         at.session_state["ledger_key"] = key
         at.run()
@@ -297,6 +306,7 @@ def check_global_calibration(seed):
     P.score = lambda preds, lookup: original(preds, lambda t: 120.0)
     try:
         at = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+        at.switch_page(RESEARCH)
         at.session_state["analysis"] = seed
         at.run()
     finally:
@@ -321,6 +331,42 @@ def check_global_calibration(seed):
     print("global calibration: cohort section and live readout rendered")
 
 
+def check_home_and_deep_link(seed):
+    """
+    The navigation shell routes correctly.
+
+    A bare visit must land on the Home hero — the arrival experience — while a
+    visit carrying ?t= (every analysis link ever shared) must land directly on
+    the Research terminal with its panes built. Both were true by construction
+    in the single-page app; after the st.navigation split they are behaviour
+    that can regress, so they are asserted.
+    """
+    at = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+    at.run()
+    if at.exception:
+        print("APPTEST FAILED — Home raised:", repr(at.exception[0])[:200])
+        sys.exit(1)
+    text = " ".join(str(m.value) for m in at.markdown)
+    if "See the chart" not in text:
+        print("APPTEST FAILED — bare visit did not render the Home hero")
+        sys.exit(1)
+    if "pane_labels" in at.session_state:
+        print("APPTEST FAILED — bare visit ran the terminal, not Home")
+        sys.exit(1)
+
+    at2 = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+    at2.query_params["t"] = "AAPL"
+    at2.session_state["analysis"] = seed
+    at2.run()
+    if at2.exception:
+        print("APPTEST FAILED — deep link raised:", repr(at2.exception[0])[:200])
+        sys.exit(1)
+    if set(at2.session_state["pane_labels"]) != EXPECTED_PANES:
+        print("APPTEST FAILED — ?t= deep link did not land on the terminal")
+        sys.exit(1)
+    print("navigation: bare visit → Home hero, ?t= deep link → terminal panes")
+
+
 def check_identity_persistence(seed):
     """
     The ledger identity is adopted from ?id= and survives a reload.
@@ -330,7 +376,8 @@ def check_identity_persistence(seed):
     key now rides in the URL. This asserts an incoming ?id= is adopted rather
     than replaced, that junk in that slot falls back to a freshly minted valid
     key rather than crashing, and that a no-id load writes a key back to the URL
-    so the next reload lands on the same identity.
+    so the next reload lands on the same identity. The identity is owned by the
+    entry script, so these run on whichever page loads (Home — the fast one).
     """
     from svp.data import predictions as P
 
@@ -374,6 +421,7 @@ def main():
     check_ledger_populated(seed)
     check_watchlist_populated(seed)
     check_global_calibration(seed)
+    check_home_and_deep_link(seed)
     check_identity_persistence(seed)
     print("APPTEST PASSED")
 

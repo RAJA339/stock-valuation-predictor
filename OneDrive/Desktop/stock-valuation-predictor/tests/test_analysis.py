@@ -187,7 +187,9 @@ class TestNavigation:
     @staticmethod
     def _source():
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(here, "app.py"), encoding="utf-8") as fh:
+        # The terminal (with SECTIONS and the tab_guard calls) moved to
+        # pages/research.py when app.py became the st.navigation entry.
+        with open(os.path.join(here, "pages", "research.py"), encoding="utf-8") as fh:
             return fh.read()
 
     @staticmethod
@@ -199,7 +201,7 @@ class TestNavigation:
             if (isinstance(node, ast.AnnAssign)
                     and getattr(node.target, "id", None) == "SECTIONS"):
                 return ast.literal_eval(node.value)
-        raise AssertionError("SECTIONS not found in app.py")
+        raise AssertionError("SECTIONS not found in pages/research.py")
 
     def test_every_guard_has_a_pane(self):
         import re
