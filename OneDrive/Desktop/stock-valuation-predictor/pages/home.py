@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from svp import marketclock, theme
+from svp import theme
 from svp.data import _userdb
 
 EXAMPLES = ["AAPL", "NVDA", "TSLA", "MSFT", "AAL"]
@@ -69,16 +69,8 @@ with _mid:
         if _c.button(_ex, key=f"ex_{_ex}", width="stretch"):
             _go(_ex)
 
-# ── Market status ────────────────────────────────────────────────────────────
-_ms = marketclock.status()
-_dot = theme.BULL if _ms.is_open else theme.MUTED
-st.markdown(
-    f"""<div style="text-align:center;margin-top:.6rem;color:{theme.MUTED};
-        font-size:.85rem;"><span style="color:{_dot};">●</span>
-        US market: <b>{_ms.label}</b> · {_ms.note}</div>""",
-    unsafe_allow_html=True,
-)
-
+# Market status lives in the persistent app header (rendered by the entry
+# script on every page), so the hero stays a hero rather than repeating it.
 st.divider()
 
 # ── What you get ─────────────────────────────────────────────────────────────

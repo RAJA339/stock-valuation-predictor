@@ -322,6 +322,80 @@ CSS = f"""
 </style>
 """
 
+# ── Layout chrome: app header, persistent footer, mobile ─────────────────────
+# Appended as a second block so the core palette CSS above stays diff-stable.
+CSS += f"""
+<style>
+    /* App header — one slim brand/status bar on every page. */
+    .svp-header {{
+        display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+        padding: 2px 0 10px 0; border-bottom: 1px solid {BORDER};
+        margin-bottom: 6px;
+    }}
+    .svp-brand {{
+        font-weight: 700; font-size: var(--fs-3); letter-spacing: .14em;
+        color: {TEXT};
+    }}
+    .svp-brand span {{ color: {EMERALD_BRIGHT}; }}
+    .svp-header-meta {{
+        color: {MUTED}; font-size: var(--fs-2); margin-left: auto;
+        display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap;
+    }}
+    .svp-dot-open {{ color: {EMERALD_BRIGHT}; }}
+    .svp-dot-closed {{ color: {MUTED}; }}
+
+    /* Persistent disclaimer footer — fixed, slim, always visible. */
+    .svp-footer {{
+        position: fixed; left: 0; right: 0; bottom: 0; z-index: 999;
+        background: {OBSIDIAN}; border-top: 1px solid {BORDER};
+        color: {MUTED}; font-size: var(--fs-1); text-align: center;
+        padding: 5px 12px;
+    }}
+    /* Keep page content from hiding behind the fixed footer. */
+    .stMainBlockContainer {{ padding-bottom: 56px; }}
+
+    /* ── Mobile ─────────────────────────────────────────────────────────── */
+    @media (max-width: 740px) {{
+        /* Metric rows: two-up instead of squeezing four across. */
+        [data-testid="stColumn"] {{
+            flex: 1 1 calc(50% - 1rem) !important;
+            min-width: calc(50% - 1rem) !important;
+        }}
+        /* Tab strips scroll sideways instead of wrapping into a pile. */
+        [data-testid="stTabs"] [role="tablist"] {{
+            overflow-x: auto; flex-wrap: nowrap; scrollbar-width: thin;
+        }}
+        h1 {{ font-size: var(--fs-5) !important; }}
+        .svp-header-meta {{ margin-left: 0; }}
+        .metric-card {{ padding: 10px 12px; }}
+    }}
+</style>
+"""
+
+FOOTER_HTML = (
+    '<div class="svp-footer">For educational purposes only. Not financial '
+    'advice. Estimates are scenario-based, never guarantees.</div>'
+)
+
+
+def app_header(market_label: str, market_is_open: bool, stamp: str) -> str:
+    """The slim brand/status bar rendered on every page by the entry script.
+
+    Carries the two things the brief wants visible everywhere: whether the US
+    market is open, and when this render happened — per-panel captions still
+    carry each dataset's own freshness, which is the honest place for it.
+    """
+    dot_cls = "svp-dot-open" if market_is_open else "svp-dot-closed"
+    return (
+        '<div class="svp-header">'
+        '<div class="svp-brand">INTRINSIC <span>·</span> STOCK VALUATION '
+        'PREDICTOR</div>'
+        f'<div class="svp-header-meta">'
+        f'<span><span class="{dot_cls}">●</span> US market: {market_label}</span>'
+        f'<span>{stamp}</span>'
+        '</div></div>'
+    )
+
 
 def style_axes(fig, ax) -> None:
     """Apply the terminal styling to a matplotlib figure/axis."""

@@ -342,10 +342,8 @@ with st.sidebar:
 # ──────────────────────────────────────────────────────────────────────────────
 # HEADER + MODEL BANNER
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown("# Intrinsic Stock Valuation Predictor")
-st.markdown("*Model Transparency · Live Data Pipelines · Scenario Analytics*")
-st.divider()
-
+# The product name lives in the persistent app header (entry script); a
+# second full-size title here read as chrome stacked on chrome.
 with st.spinner("Training / loading XGBoost ensemble..."):
     vm = get_model()
 

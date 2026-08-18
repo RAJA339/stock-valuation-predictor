@@ -22,9 +22,11 @@ This entry script owns only what must hold on *every* page:
 
 from __future__ import annotations
 
+import datetime as _dt
+
 import streamlit as st
 
-from svp import auth, theme
+from svp import auth, marketclock, theme
 from svp.data import predictions as pred_mod, profiles as prof_mod
 
 st.set_page_config(
@@ -34,6 +36,17 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 st.markdown(theme.CSS, unsafe_allow_html=True)
+
+# ── Layout chrome on every page ──────────────────────────────────────────────
+# The header carries market status and the render stamp; the fixed footer
+# carries the persistent disclaimer. Both live here, before navigation, so no
+# page can forget them.
+_ms = marketclock.status()
+st.markdown(theme.app_header(
+    _ms.label, _ms.is_open,
+    _dt.datetime.now(marketclock.ET).strftime("Rendered %b %d, %I:%M %p ET"),
+), unsafe_allow_html=True)
+st.markdown(theme.FOOTER_HTML, unsafe_allow_html=True)
 
 # ── Ledger identity — on every page ──────────────────────────────────────────
 # An anonymous key, not a login, persisted in the URL as ?id= so a page reload
