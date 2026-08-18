@@ -68,7 +68,7 @@ from svp.data import (
     crypto as crypto_mod, crypto_futures as cfut_mod,
     crypto_options as copt_mod, _userdb, scenarios as scen_mod,
     portfolio as pf_mod, journal as jrn_mod, shared_reports as sr_mod,
-    broker_import as bimp_mod,
+    broker_import as bimp_mod, prediction_markets as pm_mod,
 )
 from svp import plans as plans_mod
 from svp.models import (
@@ -170,6 +170,12 @@ def get_global_calibration():
 def get_crypto_options_cached(currency: str):
     """Live Deribit option chain (BTC/ETH), cached briefly — IV and OI move."""
     return copt_mod.get_chain(currency)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_prediction_markets_cached(symbol: str, label: str):
+    """Polymarket crowd probabilities for one coin; slow-moving, cached 5m."""
+    return pm_mod.crypto_markets(symbol, label)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -3695,3 +3701,42 @@ new TradingView.widget({{
         st.caption(_basis.structure + ".")
     else:
         st.caption("Enter a positive spot, futures and days to compute the basis.")
+
+    # ── Prediction markets — Polymarket's crowd probabilities ────────────────
+    st.markdown(theme.section("Prediction markets — crowd probabilities",
+                              "Polymarket"), unsafe_allow_html=True)
+    st.caption(
+        "A prediction-market price is a probability: a Yes contract at 62¢ "
+        "means real-money forecasters put roughly 62% on the event. That is "
+        "evidence of a different kind from the models above — a crowd that "
+        "loses money when it is wrong. Read-only: this app displays "
+        "probabilities and never places bets. Each market resolves by its "
+        "own rules — follow the link before leaning on a number.")
+    _pmkts = get_prediction_markets_cached(_coin.symbol, _coin_label)
+    if _pmkts is None:
+        _pm_cool = pm_mod.cooldown_remaining()
+        st.info(
+            "Polymarket is unreachable from this deployment right now"
+            + (f" (feed cooling down for {_pm_cool/60:.0f} more minutes)."
+               if _pm_cool > 0 else ".")
+            + " Nothing is shown rather than a stale or invented probability.")
+    elif not _pmkts:
+        st.info(f"No active Yes/No markets mentioning {_coin.symbol} were "
+                "found among Polymarket's most-traded questions right now.")
+    else:
+        for _mkt in _pmkts:
+            _pm1, _pm2 = st.columns([2.6, 1])
+            _thin = (' · <span class="verdict-over">thin book — treat with '
+                     'care</span>' if _mkt.is_thin else "")
+            _ends = f" · ends {_mkt.ends}" if _mkt.ends else ""
+            _pm1.markdown(
+                f'**[{_mkt.question}]({_mkt.url})**<br>'
+                f'<span class="verdict-tail">${_mkt.volume:,.0f} traded'
+                f'{_ends}{_thin}</span>', unsafe_allow_html=True)
+            _pm2.markdown(metric_card(
+                "Crowd says", f"{_mkt.yes_prob * 100:.0f}% yes"),
+                unsafe_allow_html=True)
+        st.caption(
+            "Sorted by volume — heavier markets carry more information. "
+            "Probabilities are the crowd's, not this app's models'; when the "
+            "two disagree, that disagreement is itself the finding.")
