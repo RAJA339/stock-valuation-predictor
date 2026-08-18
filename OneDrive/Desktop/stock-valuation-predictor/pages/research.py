@@ -68,6 +68,7 @@ from svp.data import (
     crypto as crypto_mod, crypto_futures as cfut_mod,
     crypto_options as copt_mod, _userdb, scenarios as scen_mod,
     portfolio as pf_mod, journal as jrn_mod, shared_reports as sr_mod,
+    broker_import as bimp_mod,
 )
 from svp import plans as plans_mod
 from svp.models import (
@@ -2985,6 +2986,57 @@ with tab_guard("Holdings"):
             st.warning("Not saved — check the ticker, shares and cost are all "
                        f"positive, and that you are under the "
                        f"{PLAN_LIMITS.holdings}-holding limit of your plan.")
+
+    with st.expander("Import from Robinhood or another broker (CSV)"):
+        st.markdown(
+            "**No passwords, ever.** Robinhood has no official API — tools "
+            "that offer a \"live\" connection ask for your brokerage login, "
+            "which this app will never do. Instead, export your own history: "
+            "Robinhood app → **Account → Statements & History → Reports** → "
+            "generate a report, then upload the CSV here. Positions are "
+            "rebuilt from your actual buys and sells (average-cost method, "
+            "splits handled). Generic position exports — columns like "
+            "symbol / shares / average cost — work too.")
+        _up = st.file_uploader("Broker CSV", type=["csv"], key="pf_import_file",
+                               label_visibility="collapsed")
+        if _up is not None:
+            try:
+                _imp = bimp_mod.parse_csv(_up.getvalue().decode("utf-8-sig",
+                                                                errors="replace"))
+            except Exception:
+                _imp = None
+            if _imp is None:
+                st.warning("That file does not look like a broker CSV — "
+                           "expected either a transactions report or a "
+                           "positions export.")
+            else:
+                for _n in _imp.notes:
+                    st.caption(_n)
+                if not _imp.positions:
+                    st.info("No open positions found in this file.")
+                else:
+                    st.dataframe(pd.DataFrame(
+                        [{"Ticker": p.ticker, "Shares": p.shares,
+                          "Avg cost": f"${p.avg_cost:,.2f}"}
+                         for p in _imp.positions]),
+                        hide_index=True, width="stretch")
+                    st.caption(
+                        f"Parsed as a {_imp.source} file · importing replaces "
+                        "any existing holding with the same ticker.")
+                    if st.button(f"Import {len(_imp.positions)} positions",
+                                 type="primary", key="pf_import_go"):
+                        _done = sum(
+                            1 for p in _imp.positions
+                            if pf_mod.upsert(_pf_key, p.ticker, p.shares,
+                                             p.avg_cost, "imported",
+                                             cap=PLAN_LIMITS.holdings))
+                        if _done < len(_imp.positions):
+                            st.warning(
+                                f"Imported {_done} of {len(_imp.positions)} — "
+                                f"your plan holds {PLAN_LIMITS.holdings} "
+                                "holdings; the largest positions beyond the "
+                                "cap were not stored.")
+                        st.rerun()
 
     _holdings = pf_mod.list_for(_pf_key)
     if not _holdings:
