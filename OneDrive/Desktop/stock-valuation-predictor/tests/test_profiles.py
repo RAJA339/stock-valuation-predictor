@@ -28,25 +28,28 @@ from svp import auth                                # noqa: E402
 class TestProfiles:
     def setup_method(self):
         _userdb.reset_for_tests()
+        # Unique subs per run: profiles are keyed by sub, and a fixed string
+        # would collide with any row that survived in a shared database.
+        self.sub = "sub-" + _userdb.new_key()[:8]
 
     def test_first_sign_in_adopts_the_session_key(self):
         anon = _userdb.new_key()
-        p = PR.get_or_create("google-123", "a@b.com", "Ada", anon)
+        p = PR.get_or_create(self.sub, "a@b.com", "Ada", anon)
         assert p is not None and p.created
         assert p.ledger_key == anon
         assert p.plan == "free"
 
     def test_later_sign_in_restores_the_stored_key(self):
         anon = _userdb.new_key()
-        PR.get_or_create("google-456", "a@b.com", "Ada", anon)
+        PR.get_or_create(self.sub, "a@b.com", "Ada", anon)
         other_session = _userdb.new_key()
-        p = PR.get_or_create("google-456", "a@b.com", "Ada", other_session)
+        p = PR.get_or_create(self.sub, "a@b.com", "Ada", other_session)
         assert not p.created
         assert p.ledger_key == anon          # the stored key wins
         assert p.ledger_key != other_session
 
     def test_malformed_session_key_gets_a_fresh_valid_one(self):
-        p = PR.get_or_create("github-1", None, None, "not-a-key")
+        p = PR.get_or_create(self.sub, None, None, "not-a-key")
         assert p is not None
         assert _userdb.valid_key(p.ledger_key)
 
@@ -59,10 +62,10 @@ class TestProfiles:
 
     def test_claims_refresh_but_key_never_changes(self):
         anon = _userdb.new_key()
-        PR.get_or_create("sub-9", None, None, anon)
-        p = PR.get_or_create("sub-9", "new@mail.com", "New Name", _userdb.new_key())
+        PR.get_or_create(self.sub, None, None, anon)
+        p = PR.get_or_create(self.sub, "new@mail.com", "New Name", _userdb.new_key())
         assert p.ledger_key == anon
-        stored = PR.get("sub-9")
+        stored = PR.get(self.sub)
         assert stored.email == "new@mail.com"
         assert stored.display_name == "New Name"
 

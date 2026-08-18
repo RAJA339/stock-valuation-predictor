@@ -66,19 +66,20 @@ from svp.data import (
     options as options_mod, predictions as pred_mod,
     watchlist as watch_mod, calendar as cal_mod, segments as seg_mod,
     crypto as crypto_mod, crypto_futures as cfut_mod,
-    crypto_options as copt_mod, _userdb,
+    crypto_options as copt_mod, _userdb, scenarios as scen_mod,
 )
 from svp.models import (
     valuation as val_mod, explain as explain_mod, dcf as dcf_mod, backtest as bt_mod,
     regime as regime_mod, relative as relative_mod, sizing as sizing_mod,
     derivatives as deriv_mod, crypto_ml as cml_mod,
-    crypto_regime as cregime_mod,
+    crypto_regime as cregime_mod, reverse_dcf as rdcf_mod,
 )
 from svp.analytics import (
     peers as peers_mod, technical as technical_mod, quality as quality_mod,
     screener as screener_mod, indicators as ind_mod, accuracy as acc_mod,
     microstructure as micro_mod, quant as quant_mod,
     fracdiff as fracdiff_mod, flow as flow_mod, snapshot as snap_mod,
+    confluence as conf_mod,
 )
 from svp import lwchart as lwc_mod
 from svp.data import intraday as intraday_mod
@@ -1140,11 +1141,24 @@ with tab_guard("DCF & Scenario"):
     shares = raw.get("shares") or 1e9
     net_debt = (raw.get("long_term_debt") or 0.0)
 
+    # Loading a saved scenario cannot write a widget's session key after the
+    # widget exists in the run, so the Load button stages values here and this
+    # consumes them on the rerun, before the sliders are instantiated.
+    _dcf_defaults = {"dcf_wacc": 9.0, "dcf_tg": 2.5, "dcf_ng": 8.0, "dcf_years": 5}
+    _staged = st.session_state.pop("dcf_pending_load", None)
+    if isinstance(_staged, dict):
+        for _k, _v in _staged.items():
+            if _k in _dcf_defaults:
+                st.session_state[_k] = _v
+    for _k, _v in _dcf_defaults.items():
+        st.session_state.setdefault(_k, _v)
+
     c1, c2, c3, c4 = st.columns(4)
-    wacc = c1.slider("WACC (%)", 4.0, 20.0, 9.0, 0.25) / 100
-    tgrowth = c2.slider("Terminal growth (%)", 0.0, 5.0, 2.5, 0.1) / 100
-    ngrowth = c3.slider("Near-term FCF growth (%)", -10.0, 40.0, 8.0, 0.5) / 100
-    years = c4.slider("Projection years", 3, 10, 5, 1)
+    wacc = c1.slider("WACC (%)", 4.0, 20.0, step=0.25, key="dcf_wacc") / 100
+    tgrowth = c2.slider("Terminal growth (%)", 0.0, 5.0, step=0.1, key="dcf_tg") / 100
+    ngrowth = c3.slider("Near-term FCF growth (%)", -10.0, 40.0, step=0.5,
+                        key="dcf_ng") / 100
+    years = c4.slider("Projection years", 3, 10, step=1, key="dcf_years")
 
     dcf_in = dcf_mod.DCFInputs(
         fcf0=float(fcf0), shares=float(shares), net_debt=float(net_debt),
@@ -1254,6 +1268,148 @@ with tab_guard("DCF & Scenario"):
         } for s in _shocks]),
         width="stretch", hide_index=True,
     )
+
+    # ── Saved scenarios ──────────────────────────────────────────────────────
+    st.markdown(theme.section("Saved scenarios", "Scenario lab"), unsafe_allow_html=True)
+    st.caption(
+        "Name the current assumption set and it becomes a durable artefact — "
+        "a bear case you can reload next quarter and mark against what "
+        "happened. Saved to your ledger key, so it follows your account.")
+    _sc_key = st.session_state["ledger_key"]
+    _sv1, _sv2 = st.columns([2, 1])
+    _sc_name = _sv1.text_input("Scenario name", value="",
+                               placeholder="e.g. Bear case — margin stall",
+                               label_visibility="collapsed", key="dcf_sc_name")
+    if _sv2.button("Save scenario", width="stretch", key="dcf_sc_save"):
+        if _sc_name.strip():
+            _ok = scen_mod.save(
+                _sc_key, tk, _sc_name,
+                {"dcf_wacc": wacc * 100, "dcf_tg": tgrowth * 100,
+                 "dcf_ng": ngrowth * 100, "dcf_years": int(years)},
+                fair_value=dcf_res.intrinsic_per_share)
+            if _ok:
+                st.success(f"Saved “{_sc_name.strip()}”. {_userdb.durability_note()}")
+            else:
+                st.warning("Could not save — the per-user scenario limit may "
+                           "be reached.")
+        else:
+            st.warning("Give the scenario a name first.")
+
+    _saved = scen_mod.list_for(_sc_key, tk)
+    if _saved:
+        for _s in _saved:
+            _p = _s.params
+            _l1, _l2, _l3 = st.columns([2.6, 0.7, 0.7])
+            _fv = f"${_s.fair_value:,.2f}" if _s.fair_value else "—"
+            _l1.markdown(
+                f"**{_s.name}** · {_fv} at WACC {_p.get('dcf_wacc', 0):.2f}%, "
+                f"terminal {_p.get('dcf_tg', 0):.1f}%, growth "
+                f"{_p.get('dcf_ng', 0):.1f}%, {int(_p.get('dcf_years', 5))}y")
+            if _l2.button("Load", key=f"sc_load_{_s.name}", width="stretch"):
+                st.session_state["dcf_pending_load"] = _p
+                st.rerun()
+            if _l3.button("Delete", key=f"sc_del_{_s.name}", width="stretch"):
+                scen_mod.delete(_sc_key, tk, _s.name)
+                st.rerun()
+    else:
+        st.caption("No saved scenarios for this ticker yet.")
+
+    # ── Reverse DCF — what the price implies ─────────────────────────────────
+    st.markdown(theme.section("What the price implies", "Reverse DCF"),
+                unsafe_allow_html=True)
+    st.caption(
+        "The same DCF engine run backwards: instead of assuming growth to get "
+        "a value, it solves for the FCF growth rate that makes the model's "
+        "value equal today's price — the expectation embedded in the quote, "
+        "under this model's discount-rate and terminal assumptions.")
+    _rimp = rdcf_mod.implied_growth(
+        price, float(fcf0), float(shares), float(net_debt),
+        wacc=wacc, terminal_growth=tgrowth, years=int(years))
+    if _rimp is None:
+        st.info("Reverse DCF needs a positive price and share count.")
+    else:
+        _rev_hist = sec_mod.extract_history(
+            get_facts_cached(raw.get("cik") or ""),
+            "Revenues") or sec_mod.extract_history(
+            get_facts_cached(raw.get("cik") or ""),
+            "RevenueFromContractWithCustomerExcludingAssessedTax")
+        _cagr_span = rdcf_mod.cagr_from_history(_rev_hist)
+        _cagr, _span = _cagr_span if _cagr_span else (None, None)
+
+        if _rimp.implied is not None:
+            r1, r2, r3 = st.columns(3)
+            _imp_txt = (f"{_rimp.implied * 100:.1f}%/yr"
+                        if not _rimp.capped else
+                        (f"> {rdcf_mod.GROWTH_HI * 100:.0f}%/yr"
+                         if _rimp.capped == "high"
+                         else f"< {rdcf_mod.GROWTH_LO * 100:.0f}%/yr"))
+            r1.markdown(metric_card("Market-implied FCF growth", _imp_txt),
+                        unsafe_allow_html=True)
+            r2.markdown(metric_card(
+                "If WACC +100bp", f"{_rimp.implied_at_wacc_up * 100:.1f}%/yr",
+                sub=True), unsafe_allow_html=True)
+            r3.markdown(metric_card(
+                "Delivered revenue CAGR",
+                f"{_cagr * 100:.1f}%/yr over {_span:.0f}y" if _cagr is not None
+                else "insufficient SEC history", sub=True),
+                unsafe_allow_html=True)
+        _hist_label = (f"{_span:.0f}-year revenue CAGR" if _span else
+                       "historical revenue CAGR")
+        st.markdown(rdcf_mod.verdict(_rimp, _cagr, _hist_label))
+
+# ── Confluence — appended to the Valuation pane ───────────────────────────────
+# A second guarded block for the same pane: it runs after the DCF pane body so
+# it can read this run's DCF value, and tab_guard appends it to the bottom of
+# Valuation. Containers append in execution order, so the pane reads top-down
+# as estimate → detail → the cross-model agreement summary.
+with tab_guard("Valuation"):
+    st.markdown(theme.section("Confluence", "Do the reads agree?"),
+                unsafe_allow_html=True)
+    _cf_dcf = st.session_state.get("rep_dcf")
+    _cf_dcf_gap = ((_cf_dcf.intrinsic_per_share - price) / price
+                   if _cf_dcf is not None and price else None)
+    _cf_q = None
+    try:
+        _cf_q = get_quality_cached(raw.get("cik") or "", raw.get("market_cap"))
+    except Exception:
+        _cf_q = None
+    _cf_snap = snap_mod.compute(md.history)
+    _conf = conf_mod.compute(
+        ml_gap=analysis.get("raw_mos"),
+        dcf_gap=_cf_dcf_gap,
+        piotroski=_cf_q.piotroski if _cf_q else None,
+        altman_zone=_cf_q.altman_zone if _cf_q else None,
+        technical_score=_cf_snap.score if _cf_snap else None,
+        trend=_cf_snap.trend if _cf_snap else None,
+        momentum=_cf_snap.momentum if _cf_snap else None,
+        volatility=_cf_snap.volatility if _cf_snap else None,
+    )
+    if _conf is None:
+        st.info("Too few of the underlying reads are measurable for this name "
+                "to score their agreement honestly.")
+    else:
+        _cc1, _cc2 = st.columns([1, 2.2])
+        _cc1.markdown(metric_card("Confluence", f"{_conf.score}/100"),
+                      unsafe_allow_html=True)
+        with _cc2:
+            if _conf.strengths:
+                st.markdown("**Aligned:** " + ", ".join(_conf.strengths))
+            if _conf.cautions:
+                st.markdown("**Against:** " + ", ".join(_conf.cautions))
+            st.markdown(f"_{_conf.takeaway}_")
+        with st.expander("How the score is built"):
+            st.markdown(
+                "Weighted agreement across the app's independent reads — "
+                "valuation gap (ML and DCF vs price), Piotroski quality, "
+                "Altman balance-sheet zone, technical alignment, momentum "
+                "direction, volatility. A read the data cannot support is "
+                "**skipped and the weights renormalised** — never scored as "
+                "if mediocrity had been observed. Agreement, not probability "
+                "of profit.")
+            st.dataframe(pd.DataFrame(
+                [{"Read": k, "Reading (0–100)": v, "Weight": f"{w:.0%}"}
+                 for k, (v, w) in _conf.components.items()]),
+                hide_index=True, width="stretch")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — PEERS
