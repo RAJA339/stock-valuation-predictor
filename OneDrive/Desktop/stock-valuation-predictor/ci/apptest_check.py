@@ -367,6 +367,28 @@ def check_home_and_deep_link(seed):
     print("navigation: bare visit → Home hero, ?t= deep link → terminal panes")
 
 
+def check_account_page():
+    """
+    The Account page in its unconfigured state.
+
+    CI has no [auth] secrets, which is exactly the deployment mode most
+    installs start in — the page must render the honest setup state (not a
+    dead button, not an exception) and keep the app fully usable as a guest.
+    """
+    at = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+    at.switch_page("pages/account.py")
+    at.run()
+    if at.exception:
+        print("APPTEST FAILED — Account page raised:", repr(at.exception[0])[:200])
+        sys.exit(1)
+    text = " ".join(str(m.value) for m in at.markdown).lower()
+    blob = text + " " + " ".join(str(i.value).lower() for i in at.info)
+    if "sign-in is not configured" not in blob:
+        print("APPTEST FAILED — Account page did not render the unconfigured state")
+        sys.exit(1)
+    print("account: unconfigured state renders, guest mode intact")
+
+
 def check_identity_persistence(seed):
     """
     The ledger identity is adopted from ?id= and survives a reload.
@@ -422,6 +444,7 @@ def main():
     check_watchlist_populated(seed)
     check_global_calibration(seed)
     check_home_and_deep_link(seed)
+    check_account_page()
     check_identity_persistence(seed)
     print("APPTEST PASSED")
 

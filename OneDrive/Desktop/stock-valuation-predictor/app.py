@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import streamlit as st
 
-from svp import theme
-from svp.data import predictions as pred_mod
+from svp import auth, theme
+from svp.data import predictions as pred_mod, profiles as prof_mod
 
 st.set_page_config(
     page_title="Intrinsic Stock Valuation Predictor",
@@ -49,6 +49,24 @@ if "ledger_key" not in st.session_state:
 if st.query_params.get("id") != st.session_state["ledger_key"]:
     st.query_params["id"] = st.session_state["ledger_key"]
 
+# ── Signed-in continuity ─────────────────────────────────────────────────────
+# When native OIDC sign-in is configured and the visitor is logged in, bind
+# the account to its ledger key: a first sign-in adopts the session's
+# anonymous key (pre-sign-in work is kept), and every later sign-in restores
+# the stored key — the continuity an account exists to provide. Unconfigured
+# or signed-out deployments skip this entirely and behave as before.
+_user = auth.current_user()
+if _user is not None and st.session_state.get("profile_sub") != _user.sub:
+    _prof = prof_mod.get_or_create(_user.sub, _user.email, _user.name,
+                                   st.session_state["ledger_key"])
+    if _prof is not None:
+        st.session_state["profile_sub"] = _prof.sub
+        st.session_state["profile_plan"] = _prof.plan
+        st.session_state["profile_name"] = _prof.display_name or _user.name
+        if _prof.ledger_key != st.session_state["ledger_key"]:
+            st.session_state["ledger_key"] = _prof.ledger_key
+            st.query_params["id"] = _prof.ledger_key
+
 # ── Routing ──────────────────────────────────────────────────────────────────
 # ?t= in the URL (every link ever shared) or a ticker handed over by the Home
 # search sends the visitor straight to the terminal on first load. Once the
@@ -61,4 +79,5 @@ _deep = (
 home = st.Page("pages/home.py", title="Home", default=not _deep)
 research = st.Page("pages/research.py", title="Research terminal",
                    url_path="research", default=_deep)
-st.navigation([home, research]).run()
+account = st.Page("pages/account.py", title="Account", url_path="account")
+st.navigation([home, research, account]).run()

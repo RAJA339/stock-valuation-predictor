@@ -89,3 +89,37 @@ a version-specific break should surface in a pull request rather than in
 production. The devcontainer pins 3.11 to match the middle of that matrix — no
 devcontainers image is published for 3.14, so an exact match with production is
 not available locally.
+
+## Optional: native sign-in (Google / GitHub OIDC)
+
+The app is anonymous-first and fully usable without accounts. Configuring
+sign-in adds cross-device continuity: an account is a durable pointer to one
+ledger key (`svp_profiles` table, created automatically in the same
+Postgres/SQLite the ledger uses).
+
+1. **Google Cloud console** → APIs & Services → Credentials → Create
+   credentials → OAuth client ID → type **Web application**.
+2. Authorized redirect URI: your deployed URL + `/oauth2callback`, e.g.
+   `https://YOUR-APP.streamlit.app/oauth2callback`.
+3. Streamlit Cloud → Manage app → Settings → **Secrets** — add:
+
+   ```toml
+   [auth]
+   redirect_uri = "https://YOUR-APP.streamlit.app/oauth2callback"
+   cookie_secret = "generate-a-long-random-string"
+
+   [auth.google]
+   client_id = "....apps.googleusercontent.com"
+   client_secret = "..."
+   server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+   ```
+
+4. Redeploy. The Account page grows a *Continue with Google* button; until
+   then it shows these same instructions in-app.
+
+Semantics worth knowing:
+- **First sign-in adopts the session's anonymous key** — whatever a visitor
+  did before creating the account stays theirs.
+- **Later sign-ins restore the stored key** on any device.
+- **Sign-out** clears the session and the `?id=` from the URL; the stored
+  work is untouched and returns on the next sign-in.
