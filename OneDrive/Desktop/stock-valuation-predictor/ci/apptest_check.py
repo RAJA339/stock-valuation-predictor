@@ -38,7 +38,7 @@ EXPECTED_PANES = {
     "Valuation", "Explainability", "DCF & Scenario", "Peers", "Screener",
     "Guardrails", "Backtesting", "Options & Futures",
     "Ask the Filings", "Fundamental Δ", "Segments",
-    "Watchlist", "Track Record",
+    "Watchlist", "Holdings", "Journal", "Track Record",
     "Crypto",
     "Report",
 }
@@ -389,6 +389,47 @@ def check_account_page():
     print("account: unconfigured state renders, guest mode intact")
 
 
+def check_shared_report():
+    """
+    The ?r= shared-snapshot flow end to end.
+
+    A stored snapshot must render its frozen numbers on a bare visit carrying
+    the slug (the routing, not just the page), and a revoked slug must show
+    the honest dead-end rather than an error — the recipient's two realities.
+    """
+    from svp.data import _userdb, shared_reports as SR
+
+    key = _userdb.new_key()
+    slug = SR.create(key, "AAPL", {
+        "name": "Apple Inc.", "price": 190.0, "point": 210.0,
+        "low": 180.0, "high": 240.0, "signal": "Undervalued",
+        "mos_pct": 10.5, "as_of": "test time"})
+
+    at = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+    at.query_params["r"] = slug
+    at.run()
+    if at.exception:
+        print("APPTEST FAILED — shared view raised:", repr(at.exception[0])[:200])
+        sys.exit(1)
+    text = " ".join(str(m.value) for m in at.markdown)
+    if "SHARED SNAPSHOT" not in text or "Apple Inc." not in text:
+        print("APPTEST FAILED — ?r= did not land on the rendered snapshot")
+        sys.exit(1)
+
+    SR.revoke(key, slug)
+    at2 = AppTest.from_file(os.path.join(_ROOT, "app.py"), default_timeout=240)
+    at2.query_params["r"] = slug
+    at2.run()
+    if at2.exception:
+        print("APPTEST FAILED — revoked view raised:", repr(at2.exception[0])[:200])
+        sys.exit(1)
+    blob = " ".join(str(i.value) for i in at2.info)
+    if "no longer available" not in blob:
+        print("APPTEST FAILED — revoked slug did not show the dead-end state")
+        sys.exit(1)
+    print("shared report: snapshot renders on ?r=, revocation kills the link")
+
+
 def check_identity_persistence(seed):
     """
     The ledger identity is adopted from ?id= and survives a reload.
@@ -445,6 +486,7 @@ def main():
     check_global_calibration(seed)
     check_home_and_deep_link(seed)
     check_account_page()
+    check_shared_report()
     check_identity_persistence(seed)
     print("APPTEST PASSED")
 

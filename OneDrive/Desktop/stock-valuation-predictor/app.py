@@ -75,9 +75,16 @@ if _user is not None and st.session_state.get("profile_sub") != _user.sub:
 _deep = (
     ("t" in st.query_params) or bool(st.session_state.get("pending_ticker"))
 ) and not st.session_state.get("research_visited", False)
+# A ?r= slug is a recipient opening someone's frozen snapshot — that page
+# wins the landing outright; the slug stays in the URL, so a reload still
+# shows the snapshot until the recipient navigates away themselves.
+_shared = bool((st.query_params.get("r") or "").strip())
 
-home = st.Page("pages/home.py", title="Home", default=not _deep)
+home = st.Page("pages/home.py", title="Home",
+               default=not (_deep or _shared))
 research = st.Page("pages/research.py", title="Research terminal",
-                   url_path="research", default=_deep)
+                   url_path="research", default=_deep and not _shared)
 account = st.Page("pages/account.py", title="Account", url_path="account")
-st.navigation([home, research, account]).run()
+shared = st.Page("pages/shared.py", title="Shared report", url_path="shared",
+                 default=_shared)
+st.navigation([home, research, account, shared]).run()

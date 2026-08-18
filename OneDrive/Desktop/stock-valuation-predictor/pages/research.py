@@ -67,7 +67,9 @@ from svp.data import (
     watchlist as watch_mod, calendar as cal_mod, segments as seg_mod,
     crypto as crypto_mod, crypto_futures as cfut_mod,
     crypto_options as copt_mod, _userdb, scenarios as scen_mod,
+    portfolio as pf_mod, journal as jrn_mod, shared_reports as sr_mod,
 )
+from svp import plans as plans_mod
 from svp.models import (
     valuation as val_mod, explain as explain_mod, dcf as dcf_mod, backtest as bt_mod,
     regime as regime_mod, relative as relative_mod, sizing as sizing_mod,
@@ -100,6 +102,12 @@ st.session_state["research_visited"] = True
 # entry has always set the key first.
 if "ledger_key" not in st.session_state:
     st.session_state["ledger_key"] = pred_mod.new_key()
+
+# Plan-gated capacities. Anonymous visitors get the free limits — plans gate
+# capacity, never the ability to save; the anonymous-first identity is the
+# product and a save-wall would gut it. The profile plan arrives via the
+# entry script when the visitor is signed in.
+PLAN_LIMITS = plans_mod.limits(st.session_state.get("profile_plan"))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -617,7 +625,7 @@ SECTIONS: list[tuple[str, list[str]]] = [
     ("Value",     ["Valuation", "Explainability", "DCF & Scenario", "Peers", "Screener"]),
     ("Risk",      ["Guardrails", "Backtesting", "Options & Futures"]),
     ("Filings",   ["Ask the Filings", "Fundamental Δ", "Segments"]),
-    ("Portfolio", ["Watchlist", "Track Record"]),
+    ("Portfolio", ["Watchlist", "Holdings", "Journal", "Track Record"]),
     ("Crypto",    []),
     ("Report",    []),
 ]
@@ -1286,7 +1294,8 @@ with tab_guard("DCF & Scenario"):
                 _sc_key, tk, _sc_name,
                 {"dcf_wacc": wacc * 100, "dcf_tg": tgrowth * 100,
                  "dcf_ng": ngrowth * 100, "dcf_years": int(years)},
-                fair_value=dcf_res.intrinsic_per_share)
+                fair_value=dcf_res.intrinsic_per_share,
+                cap=PLAN_LIMITS.scenarios)
             if _ok:
                 st.success(f"Saved “{_sc_name.strip()}”. {_userdb.durability_note()}")
             else:
@@ -1384,6 +1393,7 @@ with tab_guard("Valuation"):
         momentum=_cf_snap.momentum if _cf_snap else None,
         volatility=_cf_snap.volatility if _cf_snap else None,
     )
+    st.session_state["rep_confluence"] = _conf
     if _conf is None:
         st.info("Too few of the underlying reads are measurable for this name "
                 "to score their agreement honestly.")
@@ -2449,6 +2459,61 @@ with tab_guard("Report"):
         if ext == "txt":
             st.caption("ReportLab not installed — generated a plain-text report instead of PDF.")
 
+    # ── Share a snapshot ─────────────────────────────────────────────────────
+    st.markdown(theme.section("Share a snapshot", "Revocable link"),
+                unsafe_allow_html=True)
+    st.caption(
+        "Freezes what the app says about this name right now behind a random "
+        "link you control — revoke it any time, or give it an expiry. The "
+        "snapshot holds the analysis surface only: your journal, holdings, "
+        "watchlist and identity key are never in it.")
+    _sh_key = st.session_state["ledger_key"]
+    _sh1, _sh2 = st.columns([1, 1])
+    _sh_exp = _sh1.selectbox("Link expires", ["Never", "7 days", "30 days"],
+                             key="share_expiry")
+    if _sh2.button("Create shareable link", width="stretch", key="share_make"):
+        _sh_conf = st.session_state.get("rep_confluence")
+        _sh_dcf = st.session_state.get("rep_dcf")
+        _payload = {
+            "name": raw.get("name", tk), "price": price,
+            "point": result.point, "low": result.low, "high": result.high,
+            "signal": signal_text,
+            "mos_pct": round(analysis.get("raw_mos", 0.0) * 100, 1),
+            "dcf_per_share": (round(_sh_dcf.intrinsic_per_share, 2)
+                              if _sh_dcf is not None else None),
+            "confluence": _sh_conf.score if _sh_conf else None,
+            "as_of": _dt.datetime.now().strftime("%b %d, %Y %H:%M UTC"),
+        }
+        _slug = sr_mod.create(
+            _sh_key, tk, _payload,
+            expires_days={"Never": None, "7 days": 7, "30 days": 30}[_sh_exp],
+            cap=PLAN_LIMITS.active_shares)
+        if _slug:
+            st.session_state["share_last_slug"] = _slug
+        else:
+            st.warning(f"Could not create the link — your plan holds up to "
+                       f"{PLAN_LIMITS.active_shares} active links; revoke one "
+                       "below to free a slot.")
+    if st.session_state.get("share_last_slug"):
+        _slug = st.session_state["share_last_slug"]
+        st.success("Link created. Recipients open your app URL with this added:")
+        st.code(f"?r={_slug}", language=None)
+        st.markdown(f"[Preview the shared view](?r={_slug})")
+
+    _mine = sr_mod.list_for(_sh_key)
+    if _mine:
+        st.markdown("**Your links**")
+        for _rep in _mine:
+            _sl1, _sl2 = st.columns([3, 0.8])
+            _made = _dt.datetime.fromtimestamp(_rep.created_at).strftime("%b %d, %Y")
+            _state = " · **expired**" if _rep.expired else ""
+            _sl1.markdown(f"`?r={_rep.slug}` · {_rep.ticker} · created {_made}"
+                          f"{_state}")
+            if _sl2.button("Revoke", key=f"share_rev_{_rep.slug}", width="stretch"):
+                sr_mod.revoke(_sh_key, _rep.slug)
+                st.session_state.pop("share_last_slug", None)
+                st.rerun()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 14 — TRACK RECORD
@@ -2896,6 +2961,188 @@ with tab_guard("Microstructure"):
 # ══════════════════════════════════════════════════════════════════════════════
 # CRYPTO — live 24/7 charts and measured technical analysis for major coins
 # ══════════════════════════════════════════════════════════════════════════════
+with tab_guard("Holdings"):
+    st.markdown(theme.section("Portfolio holdings", "What you actually own"),
+                unsafe_allow_html=True)
+    st.caption(
+        "Entered by hand — this app never connects to a brokerage. Prices "
+        "come from the same cached market feed as the analysis (refreshed "
+        "about every 30 minutes), and anything the feed cannot price is "
+        "named rather than silently folded into the totals.")
+
+    _pf_key = st.session_state["ledger_key"]
+    with st.form("pf_add", border=False):
+        _pc1, _pc2, _pc3, _pc4 = st.columns([1, 1, 1, 1.4])
+        _pf_tkr = _pc1.text_input("Ticker", value="", max_chars=6)
+        _pf_sh = _pc2.number_input("Shares", min_value=0.0, value=0.0, step=1.0)
+        _pf_cost = _pc3.number_input("Avg cost ($)", min_value=0.0, value=0.0,
+                                     step=0.5, format="%.2f")
+        _pf_note = _pc4.text_input("Note (optional)", value="")
+        _pf_add = st.form_submit_button("Add / update holding", width="stretch")
+    if _pf_add:
+        if pf_mod.upsert(_pf_key, _pf_tkr, _pf_sh, _pf_cost, _pf_note,
+                         cap=PLAN_LIMITS.holdings):
+            st.rerun()
+        else:
+            st.warning("Not saved — check the ticker, shares and cost are all "
+                       f"positive, and that you are under the "
+                       f"{PLAN_LIMITS.holdings}-holding limit of your plan.")
+
+    _holdings = pf_mod.list_for(_pf_key)
+    if not _holdings:
+        st.info("No holdings yet. Add what you own above — shares and average "
+                "cost — and this pane prices it and keeps score honestly.")
+    else:
+        def _pf_price(t):
+            _m = get_market_cached(t, 0.0)
+            return _m.price if _m and _m.price and _m.price > 0 else None
+
+        _view = pf_mod.value(_holdings, _pf_price)
+        _pm1, _pm2, _pm3, _pm4 = st.columns(4)
+        _pm1.markdown(metric_card("Market value", f"${_view.market_value:,.0f}"),
+                      unsafe_allow_html=True)
+        _pm2.markdown(metric_card("Cost basis", f"${_view.cost_basis:,.0f}",
+                                  sub=True), unsafe_allow_html=True)
+        _pl_txt = (f"${_view.unrealized:+,.0f}"
+                   + (f" ({_view.unrealized_pct * 100:+.1f}%)"
+                      if _view.unrealized_pct is not None else ""))
+        _pm3.markdown(metric_card("Unrealized P/L", _pl_txt),
+                      unsafe_allow_html=True)
+        _pm4.markdown(metric_card(
+            "Largest position",
+            f"{_view.top_weight[0]} · {_view.top_weight[1] * 100:.0f}%"
+            if _view.top_weight else "—", sub=True), unsafe_allow_html=True)
+        if _view.top_weight and _view.top_weight[1] > 0.35:
+            st.warning(
+                f"{_view.top_weight[0]} is {_view.top_weight[1] * 100:.0f}% of "
+                "the priced book — concentration is a risk decision worth "
+                "making deliberately rather than by drift.")
+        if _view.unpriced:
+            st.info("No live price for: " + ", ".join(_view.unpriced) +
+                    " — excluded from the totals above.")
+
+        _rows = []
+        for _h in _holdings:
+            _px = _pf_price(_h.ticker)
+            _mv = _h.shares * _px if _px else None
+            _rows.append({
+                "Ticker": _h.ticker, "Shares": f"{_h.shares:g}",
+                "Avg cost": f"${_h.avg_cost:,.2f}",
+                "Price": f"${_px:,.2f}" if _px else "—",
+                "Value": f"${_mv:,.0f}" if _mv else "—",
+                "P/L": (f"{(_px / _h.avg_cost - 1) * 100:+.1f}%" if _px else "—"),
+                "Weight": (f"{_mv / _view.market_value * 100:.0f}%"
+                           if _mv and _view.market_value else "—"),
+                "Note": _h.note,
+            })
+        st.dataframe(pd.DataFrame(_rows), hide_index=True, width="stretch")
+
+        _rm_cols = st.columns(min(len(_holdings), 6))
+        for _c, _h in zip(_rm_cols * ((len(_holdings) // 6) + 1), _holdings):
+            if _c.button(f"Remove {_h.ticker}", key=f"pf_rm_{_h.ticker}",
+                         width="stretch"):
+                pf_mod.remove(_pf_key, _h.ticker)
+                st.rerun()
+    st.caption("Educational use only — not financial advice, and never a "
+               "statement of what you should hold.")
+
+with tab_guard("Journal"):
+    st.markdown(theme.section("Investment journal", "The thesis, in writing"),
+                unsafe_allow_html=True)
+    st.caption(
+        "A thesis written down before the outcome — with what would prove it "
+        "wrong — is the one you can honestly close later. Entries are yours "
+        "alone: they never appear in shared reports.")
+
+    _j_key = st.session_state["ledger_key"]
+    # Edit staging: widget keys cannot be written after instantiation, so an
+    # Edit click stages the entry here and this consumes it before the form.
+    _j_staged = st.session_state.pop("jrn_pending_load", None)
+    if isinstance(_j_staged, dict):
+        for _k, _v in _j_staged.items():
+            st.session_state[_k] = _v
+
+    _j_edit_id = st.session_state.get("jrn_edit_id")
+    st.session_state.setdefault("jrn_ticker", tk)
+    with st.form("jrn_form", border=False):
+        _jc1, _jc2, _jc3, _jc4 = st.columns([1, 1, 1, 1])
+        _j_tkr = _jc1.text_input("Ticker", max_chars=6, key="jrn_ticker")
+        _j_entry = _jc2.number_input("Entry price ($)", min_value=0.0, step=0.5,
+                                     format="%.2f", key="jrn_entry")
+        _j_target = _jc3.number_input("Target price ($)", min_value=0.0, step=0.5,
+                                      format="%.2f", key="jrn_target")
+        _j_horizon = _jc4.text_input("Time horizon", placeholder="e.g. 12 months",
+                                     key="jrn_horizon")
+        _j_thesis = st.text_area("Thesis (required)", height=80, key="jrn_thesis")
+        _ja, _jb = st.columns(2)
+        _j_bull = _ja.text_area("Bull case", height=70, key="jrn_bull")
+        _j_bear = _jb.text_area("Bear case", height=70, key="jrn_bear")
+        _jc, _jd = st.columns(2)
+        _j_cat = _jc.text_area("Catalysts", height=70, key="jrn_cat")
+        _j_risk = _jd.text_area("Risks", height=70, key="jrn_risk")
+        _j_inval = st.text_area(
+            "What would prove this wrong? (invalidation)", height=70,
+            key="jrn_inval",
+            help="The falsifier you commit to in advance. A thesis without "
+                 "one can always be re-narrated after the fact.")
+        _j_notes = st.text_area("Notes", height=60, key="jrn_notes")
+        _j_save = st.form_submit_button(
+            "Update entry" if _j_edit_id else "Save entry", width="stretch")
+
+    if _j_save:
+        _eid = jrn_mod.save(
+            _j_key, _j_tkr, entry_id=_j_edit_id, thesis=_j_thesis,
+            bull_case=_j_bull, bear_case=_j_bear, catalysts=_j_cat,
+            risks=_j_risk, invalidation=_j_inval,
+            entry_price=_j_entry or None, target_price=_j_target or None,
+            horizon=_j_horizon, notes=_j_notes, cap=PLAN_LIMITS.journal_entries)
+        if _eid:
+            st.session_state.pop("jrn_edit_id", None)
+            st.rerun()
+        else:
+            st.warning("Not saved — a new entry needs a ticker and a thesis, "
+                       f"and your plan holds up to "
+                       f"{PLAN_LIMITS.journal_entries} entries.")
+    if _j_edit_id and st.button("Cancel edit", key="jrn_cancel"):
+        st.session_state.pop("jrn_edit_id", None)
+        st.rerun()
+
+    _entries = jrn_mod.list_for(_j_key)
+    if not _entries:
+        st.info("No journal entries yet.")
+    for _e in _entries:
+        _title = (f"{_e.ticker} · {_e.thesis[:70]}"
+                  + ("…" if len(_e.thesis) > 70 else ""))
+        _stamp = _dt.datetime.fromtimestamp(_e.updated_at).strftime("%b %d, %Y")
+        with st.expander(f"{_title} — {_stamp}"):
+            if _e.entry_price or _e.target_price or _e.horizon:
+                st.markdown(" · ".join(filter(None, [
+                    f"Entry ${_e.entry_price:,.2f}" if _e.entry_price else None,
+                    f"Target ${_e.target_price:,.2f}" if _e.target_price else None,
+                    _e.horizon or None])))
+            for _label, _val in (("Thesis", _e.thesis), ("Bull case", _e.bull_case),
+                                 ("Bear case", _e.bear_case),
+                                 ("Catalysts", _e.catalysts), ("Risks", _e.risks),
+                                 ("Proves it wrong", _e.invalidation),
+                                 ("Notes", _e.notes)):
+                if _val:
+                    st.markdown(f"**{_label}.** {_val}")
+            _eb1, _eb2 = st.columns(2)
+            if _eb1.button("Edit", key=f"jrn_ed_{_e.entry_id}", width="stretch"):
+                st.session_state["jrn_pending_load"] = {
+                    "jrn_ticker": _e.ticker, "jrn_entry": _e.entry_price or 0.0,
+                    "jrn_target": _e.target_price or 0.0,
+                    "jrn_horizon": _e.horizon, "jrn_thesis": _e.thesis,
+                    "jrn_bull": _e.bull_case, "jrn_bear": _e.bear_case,
+                    "jrn_cat": _e.catalysts, "jrn_risk": _e.risks,
+                    "jrn_inval": _e.invalidation, "jrn_notes": _e.notes,
+                }
+                st.session_state["jrn_edit_id"] = _e.entry_id
+                st.rerun()
+            if _eb2.button("Delete", key=f"jrn_del_{_e.entry_id}", width="stretch"):
+                jrn_mod.delete(_j_key, _e.entry_id)
+                st.rerun()
+
 with tab_guard("Crypto"):
     st.markdown(theme.section("Live crypto — chart and measured signals", "Crypto"),
                 unsafe_allow_html=True)

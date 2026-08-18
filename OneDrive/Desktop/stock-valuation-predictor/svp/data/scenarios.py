@@ -82,7 +82,7 @@ def _count(key: str) -> int:
 
 
 def save(ledger_key: str, ticker: str, name: str, params: dict,
-         fair_value: Optional[float] = None) -> bool:
+         fair_value: Optional[float] = None, cap: int = MAX_PER_KEY) -> bool:
     """
     Upsert one named scenario. Returns True when stored.
 
@@ -97,7 +97,7 @@ def save(ledger_key: str, ticker: str, name: str, params: dict,
     key = ledger_key.strip().lower()
 
     existing = {s.name for s in list_for(key, ticker)}
-    if name not in existing and _count(key) >= MAX_PER_KEY:
+    if name not in existing and _count(key) >= cap:
         return False
 
     try:
