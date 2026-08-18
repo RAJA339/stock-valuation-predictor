@@ -121,45 +121,69 @@ class TestSlugMatching:
 
 
 class TestPagination:
-    def _pages(self, sizes):
-        """A stub page_fn serving pages of the given sizes, then empty."""
+    def _pages(self, sizes_by_order):
+        """A stub page_fn serving per-sweep page sizes, unique ids per row."""
         calls = []
 
-        def fn(offset):
-            calls.append(offset)
-            idx = len(calls) - 1
-            n = sizes[idx] if idx < len(sizes) else 0
-            return [_m(slug=f"m-{offset}-{i}") for i in range(n)]
+        def fn(offset, order, ascending):
+            calls.append((order, offset))
+            page_idx = sum(1 for o, _ in calls if o == order) - 1
+            sizes = sizes_by_order.get(order, [])
+            n = sizes[page_idx] if page_idx < len(sizes) else 0
+            return [dict(_m(slug=f"{order}-{offset}-{i}"),
+                         id=f"{order}-{offset}-{i}") for i in range(n)]
         fn.calls = calls
         return fn
 
-    def test_short_page_stops_the_scan(self):
-        fn = self._pages([PM._PAGE_LIMIT, 40])
+    def test_short_page_stops_each_sweep(self):
+        fn = self._pages({"volumeNum": [PM._PAGE_LIMIT, 40], "id": [10]})
         out = PM.fetch_markets(page_fn=fn)
-        assert len(out) == PM._PAGE_LIMIT + 40
-        assert len(fn.calls) == 2                    # did not fetch page 3
+        assert len(out) == PM._PAGE_LIMIT + 40 + 10
+        # volume sweep stopped after its short page 2; id sweep after page 1.
+        assert len(fn.calls) == 3
 
-    def test_page_cap_bounds_the_scan(self):
-        fn = self._pages([PM._PAGE_LIMIT] * 10)
+    def test_page_cap_bounds_each_sweep(self):
+        fn = self._pages({"volumeNum": [PM._PAGE_LIMIT] * 10,
+                          "id": [PM._PAGE_LIMIT] * 10})
         out = PM.fetch_markets(page_fn=fn)
-        assert len(fn.calls) == PM._MAX_PAGES
-        assert len(out) == PM._PAGE_LIMIT * PM._MAX_PAGES
+        assert len(fn.calls) == 2 * PM._PASS_PAGES
+        assert len(out) == 2 * PM._PASS_PAGES * PM._PAGE_LIMIT
+
+    def test_both_sweeps_run_and_dedupe_by_id(self):
+        def fn(offset, order, ascending):
+            # Every sweep returns the SAME market — it must count once.
+            return [dict(_m(slug="dup"), id="dup-1")] if offset == 0 else []
+        out = PM.fetch_markets(page_fn=fn)
+        assert len(out) == 1
 
     def test_midscan_failure_keeps_fetched_pages_and_trips(self):
-        def fn(offset):
-            if offset == 0:
-                return [_m()] * PM._PAGE_LIMIT
+        def fn(offset, order, ascending):
+            if order == "volumeNum" and offset == 0:
+                return [dict(_m(slug=f"v-{i}"), id=f"v-{i}")
+                        for i in range(PM._PAGE_LIMIT)]
             raise Exception("boom")
         out = PM.fetch_markets(page_fn=fn)
         assert out is not None and len(out) == PM._PAGE_LIMIT
         assert PM.cooldown_remaining() > 0
         PM._COOLDOWN_UNTIL = 0.0
 
-    def test_first_page_failure_is_none(self):
-        def fn(offset):
+    def test_total_failure_is_none(self):
+        def fn(offset, order, ascending):
             raise Exception("boom")
         assert PM.fetch_markets(page_fn=fn) is None
         PM._COOLDOWN_UNTIL = 0.0
+
+
+class TestScan:
+    def test_scan_reports_what_it_looked_at(self):
+        raw = [_m(), _m(question="Will the Fed cut?", slug="fed")]
+        s = PM.scan(raw, "BTC")
+        assert s.scanned == 2
+        assert len(s.markets) == 1
+
+    def test_scan_of_nothing_is_empty_not_crash(self):
+        s = PM.scan([], "BTC")
+        assert s.scanned == 0 and s.markets == []
 
 
 class TestBreaker:

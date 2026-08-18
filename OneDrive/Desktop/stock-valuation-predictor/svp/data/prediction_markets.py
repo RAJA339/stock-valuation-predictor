@@ -31,8 +31,18 @@ from datetime import datetime
 from typing import Optional
 
 _BASE = "https://gamma-api.polymarket.com/markets"
-_PAGE_LIMIT = 500
-_MAX_PAGES = 4
+# Gamma clamps every page to 100 rows regardless of the limit asked for — the
+# deployed scan count proved it (a limit=500 request came back with exactly
+# 100). Page size therefore matches the real cap, and coverage comes from the
+# number of pages, not from wishing the limit were bigger.
+_PAGE_LIMIT = 100
+_PASS_PAGES = 5
+#: Two sweeps, because each ordering misses what the other catches: the
+#: volume leaderboard is dominated by sports and politics (crypto may not
+#: crack the top 500), while the newest markets are minted daily and BTC/ETH
+#: dailies are always among them — but a big old "BTC by year end" book only
+#: shows in the volume sweep.
+_SWEEPS = (("volumeNum", "false"), ("id", "false"))
 _HEADERS = {"User-Agent": "StockValuationPredictor/1.0 (educational)"}
 _TIMEOUT = 12
 
@@ -179,43 +189,54 @@ def filter_markets(raw: list[dict], keywords: list[str],
     return out[:max_n]
 
 
-def _get_page(offset: int) -> list:
+def _get_page(offset: int, order: str, ascending: str) -> list:
     """One page of active markets from Gamma. Raises on transport errors."""
     import requests
 
     r = requests.get(
         f"{_BASE}?active=true&closed=false&limit={_PAGE_LIMIT}"
-        f"&offset={offset}&volume_num_min=1000",
+        f"&offset={offset}&order={order}&ascending={ascending}"
+        "&volume_num_min=500",
         headers=_HEADERS, timeout=_TIMEOUT)
     r.raise_for_status()
     data = r.json()
     return data if isinstance(data, list) else []
 
 
+def _key(d: dict) -> Optional[str]:
+    v = d.get("id") or d.get("slug")
+    return str(v) if v else None
+
+
 def fetch_markets(page_fn=None) -> Optional[list[dict]]:
     """
-    Active markets from Gamma across several pages, or ``None``.
+    Active markets from Gamma — top-volume sweep plus newest sweep, deduped.
 
-    Paginates rather than trusting any server-side ordering: the volume
-    leaderboard is dominated by sports and politics, so "the top 150" can
-    legitimately contain zero crypto questions — the original bug. A failure
-    mid-scan keeps the pages already fetched (a partial scan of real data
-    beats none) and still trips the breaker for the next caller; a failure
-    on the first page returns ``None``.
+    A failure mid-scan keeps everything already fetched (a partial scan of
+    real data beats none) and still trips the breaker for the next caller; a
+    failure before anything arrived returns ``None``.
     """
     if cooldown_remaining() > 0:
         return None
     fetch = page_fn or _get_page
     out: list[dict] = []
-    for page in range(_MAX_PAGES):
-        try:
-            batch = fetch(page * _PAGE_LIMIT)
-        except Exception as exc:
-            _trip(exc)
-            return out if out else None
-        out.extend(batch)
-        if len(batch) < _PAGE_LIMIT:
-            break
+    seen: set[str] = set()
+    for order, ascending in _SWEEPS:
+        for page in range(_PASS_PAGES):
+            try:
+                batch = fetch(page * _PAGE_LIMIT, order, ascending)
+            except Exception as exc:
+                _trip(exc)
+                return out if out else None
+            for d in batch:
+                k = _key(d) if isinstance(d, dict) else None
+                if k is not None and k in seen:
+                    continue
+                if k is not None:
+                    seen.add(k)
+                out.append(d)
+            if len(batch) < _PAGE_LIMIT:
+                break
     return out
 
 
@@ -226,13 +247,23 @@ class Scan:
     scanned: int
 
 
+def scan(raw: list[dict], symbol: str, label: str = "",
+         max_n: int = 8) -> Scan:
+    """Filter one coin out of an already-fetched market list. Pure."""
+    return Scan(
+        markets=filter_markets(raw, keywords_for(symbol, label), max_n=max_n),
+        scanned=len(raw or []),
+    )
+
+
 def crypto_markets(symbol: str, label: str = "",
                    max_n: int = 8) -> Optional[Scan]:
-    """Top prediction markets for one coin, or ``None`` when unreachable."""
+    """Top prediction markets for one coin, or ``None`` when unreachable.
+
+    Callers that show several coins should fetch once and use :func:`scan`
+    per coin instead — the fetch is the expensive part.
+    """
     raw = fetch_markets()
     if raw is None:
         return None
-    return Scan(
-        markets=filter_markets(raw, keywords_for(symbol, label), max_n=max_n),
-        scanned=len(raw),
-    )
+    return scan(raw, symbol, label, max_n=max_n)

@@ -173,9 +173,14 @@ def get_crypto_options_cached(currency: str):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_prediction_markets_cached(symbol: str, label: str):
-    """Polymarket crowd probabilities for one coin; slow-moving, cached 5m."""
-    return pm_mod.crypto_markets(symbol, label)
+def get_polymarket_raw_cached():
+    """One shared Polymarket sweep (≈1,000 markets), cached 5m for all coins.
+
+    The fetch is ten paged requests; the per-coin filtering is trivial. Caching
+    the raw list means switching coins costs nothing and every coin's panel
+    reads the same scan.
+    """
+    return pm_mod.fetch_markets()
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -3712,7 +3717,9 @@ new TradingView.widget({{
         "loses money when it is wrong. Read-only: this app displays "
         "probabilities and never places bets. Each market resolves by its "
         "own rules — follow the link before leaning on a number.")
-    _pscan = get_prediction_markets_cached(_coin.symbol, _coin_label)
+    _praw = get_polymarket_raw_cached()
+    _pscan = pm_mod.scan(_praw, _coin.symbol, _coin_label) \
+        if _praw is not None else None
     if _pscan is None:
         _pm_cool = pm_mod.cooldown_remaining()
         st.info(
