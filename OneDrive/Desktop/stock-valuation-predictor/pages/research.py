@@ -919,7 +919,7 @@ with tab_guard("Charts"):
     new TradingView.widget({{
       "autosize": true, "symbol": "{tk}", "interval": "{tv_map[tv_interval]}",
       "timezone": "America/New_York", "theme": "dark", "style": "1", "locale": "en",
-      "toolbar_bg": "#161B22", "enable_publishing": false, "hide_side_toolbar": false,
+      "toolbar_bg": "{theme.PANEL}", "enable_publishing": false, "hide_side_toolbar": false,
       "allow_symbol_change": true, "withdateranges": true, "details": true,
       "studies": ["MASimple@tv-basicstudies", "RSI@tv-basicstudies",
                   "MACD@tv-basicstudies", "VWAP@tv-basicstudies"],
@@ -3250,7 +3250,7 @@ with tab_guard("Crypto"):
 new TradingView.widget({{
   "autosize": true, "symbol": "{_coin.tv}", "interval": "{_tv_map[_cx_interval]}",
   "timezone": "Etc/UTC", "theme": "dark", "style": "1", "locale": "en",
-  "toolbar_bg": "#161B22", "enable_publishing": false, "hide_side_toolbar": false,
+  "toolbar_bg": "{theme.PANEL}", "enable_publishing": false, "hide_side_toolbar": false,
   "allow_symbol_change": true, "withdateranges": true, "details": true,
   "studies": ["MASimple@tv-basicstudies", "RSI@tv-basicstudies",
               "MACD@tv-basicstudies"],

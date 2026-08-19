@@ -179,7 +179,7 @@ def build_chart_html(
         "mainHeight": int(height),
         "rsiHeight": 110,
         "colors": {
-            "bg": theme.OBSIDIAN_DEEP, "text": theme.MUTED, "grid": "#1B1F23",
+            "bg": theme.BG, "text": theme.MUTED, "grid": theme.GRID,
             "bull": theme.BULL, "bear": theme.BEAR,
             "line": theme.EMERALD_BRIGHT, "areaTop": "rgba(31,168,124,0.25)",
             "areaBottom": "rgba(31,168,124,0.02)",
@@ -191,7 +191,7 @@ def build_chart_html(
     # The JS below is deliberately plain: create chart, add series, set data,
     # add price lines, optionally sync an RSI pane underneath.
     html = f"""
-<div id="svp-lwc" style="width:100%;background:{theme.OBSIDIAN_DEEP};
+<div id="svp-lwc" style="width:100%;background:{theme.BG};
      border:1px solid {theme.BORDER};border-radius:8px;overflow:hidden;"></div>
 <script src="{_CDN}"></script>
 <script>

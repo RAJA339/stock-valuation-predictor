@@ -4,7 +4,7 @@ Shared palette, matplotlib styling and Streamlit CSS.
 
 Four colours, allocated on a strict 60 / 30 / 10 rule.
 
-  60%  OBSIDIAN BLACK  — every surface: page ground, cards, sidebar, table
+  60%  DEEP NAVY       — every surface: page ground, cards, sidebar, table
                          bodies, inputs, buttons at rest. Four values of the
                          one hue, so depth comes from lightness rather than
                          from introducing colours.
@@ -20,9 +20,9 @@ has to be red. ``GARNET`` is therefore derived at the same saturation and
 value as the emerald so it sits inside the family rather than shouting over
 it. It is used for direction only, never for decoration.
 
-Deep emerald at full depth disappears against obsidian, so ``EMERALD_BRIGHT``
-is used for type and candles while ``EMERALD`` fills larger areas where the
-darker value reads correctly.
+Deep emerald at full depth disappears against the navy ground, so
+``EMERALD_BRIGHT`` is used for type and candles while ``EMERALD`` fills larger
+areas where the darker value reads correctly.
 
 Nothing outside these groups introduces a hue. ``svp.charts`` imports directly
 from here, so the charts cannot drift from the UI.
@@ -30,18 +30,29 @@ from here, so the charts cannot drift from the UI.
 
 from __future__ import annotations
 
-# ── 60% — OBSIDIAN BLACK: every surface ──────────────────────────────────────
-OBSIDIAN_DEEP = "#0A0B0D"   # page ground
-OBSIDIAN      = "#121417"   # card / panel surface
-OBSIDIAN_HI   = "#1B1F23"   # hover / raised
-OBSIDIAN_LINE = "#272C31"   # borders, dividers
+# ── 60% — DEEP NAVY: every surface ───────────────────────────────────────────
+# Anchored on the brand ground #1C1C28 (RGB 28,28,40). The lighter values step
+# up in the same proportions the previous obsidian family used, and each keeps
+# the ground's blue lift — blue roughly twelve points above red and green — so
+# the four read as one hue at four depths rather than as four greys.
+NAVY_DEEP = "#1C1C28"   # page ground — the brand colour
+NAVY      = "#242431"   # card / panel surface
+NAVY_HI   = "#2D2D3B"   # hover / raised
+NAVY_LINE = "#393948"   # borders, dividers
 
-BG       = OBSIDIAN_DEEP
-PANEL    = OBSIDIAN
-PANEL_HI = OBSIDIAN_HI
-SIDEBAR  = "#0E1013"
-BORDER   = OBSIDIAN_LINE
-GRID     = "#20242A"
+BG       = NAVY_DEEP
+PANEL    = NAVY
+PANEL_HI = NAVY_HI
+SIDEBAR  = "#20202D"    # between ground and card, as the previous palette had it
+BORDER   = NAVY_LINE
+GRID     = "#2F2F3E"
+
+# Names the previous palette exported. Kept so nothing outside this module
+# has to know the ground changed hue; they resolve to the navy values.
+OBSIDIAN_DEEP = NAVY_DEEP
+OBSIDIAN      = NAVY
+OBSIDIAN_HI   = NAVY_HI
+OBSIDIAN_LINE = NAVY_LINE
 
 # ── 30% — PEARL WHITE: everything you read ───────────────────────────────────
 PEARL       = "#F4F2ED"     # primary type
