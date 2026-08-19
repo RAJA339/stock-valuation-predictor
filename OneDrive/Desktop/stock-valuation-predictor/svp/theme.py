@@ -337,6 +337,16 @@ CSS = f"""
 # Appended as a second block so the core palette CSS above stays diff-stable.
 CSS += f"""
 <style>
+    /* ── Streamlit's own chrome ──────────────────────────────────────────
+       The top header strip and the iframes embedded widgets sit in are not
+       reached by the palette: left alone they paint Streamlit's default
+       near-black, which shows as dark bands above and around the content and
+       breaks the single navy field. Pinned to the ground colour here. */
+    html, body {{ background: {BG}; }}
+    header[data-testid="stHeader"] {{ background: {BG} !important; }}
+    div[data-testid="stToolbar"] {{ background: transparent !important; }}
+    iframe {{ background: {BG}; color-scheme: dark; }}
+
     /* App header — one slim brand/status bar on every page. */
     .svp-header {{
         display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;

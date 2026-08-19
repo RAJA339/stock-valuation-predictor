@@ -911,7 +911,8 @@ with tab_guard("Charts"):
         if chart_style == "TradingView":
             tv_map = {"5m": "5", "10m": "10", "15m": "15", "30m": "30", "1h": "60"}
             st.components.v1.html(f"""
-    <div class="tradingview-widget-container" style="height:620px">
+    <div class="tradingview-widget-container"
+         style="height:620px;background:{theme.BG}">
       <div id="tv_chart" style="height:620px"></div>
     </div>
     <script src="https://s3.tradingview.com/tv.js"></script>
@@ -919,10 +920,19 @@ with tab_guard("Charts"):
     new TradingView.widget({{
       "autosize": true, "symbol": "{tk}", "interval": "{tv_map[tv_interval]}",
       "timezone": "America/New_York", "theme": "dark", "style": "1", "locale": "en",
-      "toolbar_bg": "{theme.PANEL}", "enable_publishing": false, "hide_side_toolbar": false,
+      "toolbar_bg": "{theme.PANEL}", "backgroundColor": "{theme.BG}",
+      "gridColor": "{theme.GRID}",
+      "enable_publishing": false, "hide_side_toolbar": false,
       "allow_symbol_change": true, "withdateranges": true, "details": true,
       "studies": ["MASimple@tv-basicstudies", "RSI@tv-basicstudies",
                   "MACD@tv-basicstudies", "VWAP@tv-basicstudies"],
+      "overrides": {{
+        "paneProperties.background": "{theme.BG}",
+        "paneProperties.backgroundType": "solid",
+        "paneProperties.vertGridProperties.color": "{theme.GRID}",
+        "paneProperties.horzGridProperties.color": "{theme.GRID}",
+        "scalesProperties.backgroundColor": "{theme.BG}"
+      }},
       "container_id": "tv_chart"
     }});
     </script>
@@ -3242,7 +3252,8 @@ with tab_guard("Crypto"):
     # Live TradingView chart for the coin — inherently 24/7 and streaming.
     _tv_map = {"5m": "5", "10m": "10", "15m": "15", "30m": "30", "1h": "60"}
     st.components.v1.html(f"""
-<div class="tradingview-widget-container" style="height:600px">
+<div class="tradingview-widget-container"
+     style="height:600px;background:{theme.BG}">
   <div id="tv_crypto" style="height:600px"></div>
 </div>
 <script src="https://s3.tradingview.com/tv.js"></script>
@@ -3250,10 +3261,19 @@ with tab_guard("Crypto"):
 new TradingView.widget({{
   "autosize": true, "symbol": "{_coin.tv}", "interval": "{_tv_map[_cx_interval]}",
   "timezone": "Etc/UTC", "theme": "dark", "style": "1", "locale": "en",
-  "toolbar_bg": "{theme.PANEL}", "enable_publishing": false, "hide_side_toolbar": false,
+  "toolbar_bg": "{theme.PANEL}", "backgroundColor": "{theme.BG}",
+  "gridColor": "{theme.GRID}",
+  "enable_publishing": false, "hide_side_toolbar": false,
   "allow_symbol_change": true, "withdateranges": true, "details": true,
   "studies": ["MASimple@tv-basicstudies", "RSI@tv-basicstudies",
               "MACD@tv-basicstudies"],
+  "overrides": {{
+    "paneProperties.background": "{theme.BG}",
+    "paneProperties.backgroundType": "solid",
+    "paneProperties.vertGridProperties.color": "{theme.GRID}",
+    "paneProperties.horzGridProperties.color": "{theme.GRID}",
+    "scalesProperties.backgroundColor": "{theme.BG}"
+  }},
   "container_id": "tv_crypto"
 }});
 </script>

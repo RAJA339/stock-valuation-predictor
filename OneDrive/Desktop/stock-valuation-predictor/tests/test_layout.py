@@ -31,6 +31,52 @@ class TestHeader:
         assert "svp-dot-closed" in h and "svp-dot-open" not in h
 
 
+def _luminance(hex_colour: str) -> float:
+    h = hex_colour.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+    def chan(v):
+        v /= 255
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * chan(r) + 0.7152 * chan(g) + 0.0722 * chan(b)
+
+
+class TestNoBlackSurfaces:
+    """
+    The brand ground is the darkest thing in the app.
+
+    'No black anywhere' is the design rule the navy palette exists to serve,
+    and it is only true if every other surface sits *above* the ground in
+    luminance. A future tweak that darkens a card or a border past #1C1C28
+    reintroduces the black this replaced, so the rule is asserted rather than
+    remembered.
+    """
+
+    SURFACES = ("SIDEBAR", "PANEL", "PANEL_HI", "GRID", "BORDER")
+
+    def test_ground_is_the_brand_navy(self):
+        assert theme.BG.upper() == "#1C1C28"
+
+    def test_nothing_is_darker_than_the_ground(self):
+        ground = _luminance(theme.BG)
+        for name in self.SURFACES:
+            assert _luminance(getattr(theme, name)) >= ground, \
+                f"{name} is darker than the brand ground"
+
+    def test_surfaces_stay_one_hue(self):
+        """Blue above red and green on every surface — navy, never grey."""
+        for name in ("BG",) + self.SURFACES:
+            h = getattr(theme, name).lstrip("#")
+            r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+            assert b > max(r, g) + 5, f"{name} has lost its blue lift"
+
+    def test_streamlit_chrome_is_pinned_to_the_ground(self):
+        """Header and iframes paint Streamlit's near-black unless overridden."""
+        for sel in ('header[data-testid="stHeader"]', "iframe", "html, body"):
+            assert sel in theme.CSS, f"{sel} not covered by the stylesheet"
+
+
 class TestStreamlitThemeConfig:
     """
     .streamlit/config.toml must match the palette in svp/theme.py.
