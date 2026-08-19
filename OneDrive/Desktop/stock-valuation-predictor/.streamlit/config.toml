@@ -1,15 +1,18 @@
 # Mirrors the 60/30/10 palette in svp/theme.py — keep the two in sync.
 # This styles the Streamlit chrome (menus, spinners, date pickers) that the
 # injected CSS cannot reach.
-#   primaryColor             = 10% accent — champagne beige
-#   backgroundColor          = 60% obsidian black, deepest value
-#   secondaryBackgroundColor = 60% obsidian black, card surface
-#   textColor                = 30% pearl white
+#   primaryColor             = 10% accent — champagne beige   (theme.AMBER)
+#   backgroundColor          = 60% deep navy, page ground     (theme.BG)
+#   secondaryBackgroundColor = 60% deep navy, card surface    (theme.PANEL)
+#   textColor                = 30% pearl white                (theme.TEXT)
+# These are Streamlit's *native* theme settings and they win over the injected
+# CSS for the page background — so drift here is invisible in the source and
+# obvious on screen. tests/test_layout.py asserts the four values match.
 [theme]
 base = "dark"
 primaryColor = "#E3D2AE"
-backgroundColor = "#0A0B0D"
-secondaryBackgroundColor = "#121417"
+backgroundColor = "#1C1C28"
+secondaryBackgroundColor = "#242431"
 textColor = "#F4F2ED"
 
 [server]

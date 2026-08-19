@@ -31,6 +31,41 @@ class TestHeader:
         assert "svp-dot-closed" in h and "svp-dot-open" not in h
 
 
+class TestStreamlitThemeConfig:
+    """
+    .streamlit/config.toml must match the palette in svp/theme.py.
+
+    Streamlit's native [theme] settings win over the injected CSS for the page
+    background, so a palette change that updates theme.py alone leaves the app
+    looking exactly as it did — which is precisely what happened when the
+    ground moved to navy. A comment saying "keep the two in sync" is not a
+    mechanism; this is.
+    """
+
+    @staticmethod
+    def _config():
+        import tomllib
+
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(here, ".streamlit", "config.toml"), "rb") as fh:
+            return tomllib.load(fh)["theme"]
+
+    def test_background_matches_the_palette_ground(self):
+        assert self._config()["backgroundColor"].upper() == theme.BG.upper()
+
+    def test_secondary_background_matches_the_card_surface(self):
+        assert self._config()["secondaryBackgroundColor"].upper() == theme.PANEL.upper()
+
+    def test_text_colour_matches(self):
+        assert self._config()["textColor"].upper() == theme.TEXT.upper()
+
+    def test_primary_matches_the_accent(self):
+        assert self._config()["primaryColor"].upper() == theme.AMBER.upper()
+
+    def test_base_is_dark(self):
+        assert self._config()["base"] == "dark"
+
+
 class TestFooterAndCSS:
     def test_footer_carries_the_disclaimer(self):
         assert "For educational purposes only" in theme.FOOTER_HTML
