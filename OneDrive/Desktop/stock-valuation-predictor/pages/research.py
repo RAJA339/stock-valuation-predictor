@@ -76,14 +76,16 @@ from svp.models import (
     regime as regime_mod, relative as relative_mod, sizing as sizing_mod,
     derivatives as deriv_mod, crypto_ml as cml_mod,
     crypto_regime as cregime_mod, reverse_dcf as rdcf_mod,
+    conformal as conf_mod, regime_dcf as rdcf_regime,
 )
+import plotly.graph_objects as go
 from svp.analytics import (
     peers as peers_mod, technical as technical_mod, quality as quality_mod,
     screener as screener_mod, indicators as ind_mod, accuracy as acc_mod,
     microstructure as micro_mod, quant as quant_mod,
     fracdiff as fracdiff_mod, flow as flow_mod, snapshot as snap_mod,
-    confluence as conf_mod, volume_profile as vp_mod, amd as amd_mod,
-    fvg as fvg_mod,
+    confluence as confl_mod, volume_profile as vp_mod, amd as amd_mod,
+    fvg as fvg_mod, risk as risk_mod, transcript as tscript_mod,
 )
 from svp import lwchart as lwc_mod
 from svp.data import intraday as intraday_mod
@@ -1167,6 +1169,49 @@ with tab_guard("Valuation"):
                 f"via {sent_obj.source}"
             )
 
+        # ── Hedging / evasion index ──────────────────────────────────────────
+        # FinBERT answers "does this read positive". It cannot answer how much
+        # of what was said was actually committed to — and "revenue will grow
+        # 12%" versus "revenue could see some improvement, subject to
+        # headwinds" can score the same polarity while carrying completely
+        # different information. This measures that second axis by counting.
+        _lang = tscript_mod.analyse(transcript) if transcript else None
+        if _lang is not None:
+            st.markdown(theme.section("Executive language", "HEDGING INDEX"),
+                        unsafe_allow_html=True)
+            _l1, _l2, _l3 = st.columns(3)
+            _tone_cls = {"Heavily hedged": "signal-sell", "Mixed": "signal-hold",
+                         "Committed": "signal-buy"}[_lang.tone]
+            _l1.markdown(
+                f'<div class="metric-card"><div class="metric-label">Tone</div>'
+                f'<div class="{_tone_cls}">{_lang.tone}</div></div>',
+                unsafe_allow_html=True)
+            _l2.markdown(metric_card("Hedging index",
+                                     f"{_lang.hedging_index:.2f}"),
+                         unsafe_allow_html=True)
+            _l3.markdown(metric_card(
+                "Hedges vs commitments",
+                f"{_lang.hedges} vs {_lang.commitments}", sub=True),
+                unsafe_allow_html=True)
+            st.markdown(f"_{_lang.reading()}_")
+            if _lang.matched_hedges or _lang.matched_headwinds:
+                with st.expander("Which phrases were counted"):
+                    st.dataframe(pd.DataFrame(
+                        [{"Category": "Hedge", "Phrase": t, "Count": n}
+                         for t, n in _lang.matched_hedges]
+                        + [{"Category": "Headwind", "Phrase": t, "Count": n}
+                           for t, n in _lang.matched_headwinds]
+                        + [{"Category": "Commitment", "Phrase": t, "Count": n}
+                           for t, n in _lang.matched_commitments]),
+                        hide_index=True, width="stretch")
+                    st.caption(
+                        "Every number above is a word count you can check "
+                        "against the transcript. A high index is a prompt to "
+                        "read the passages, not a finding about the company.")
+        elif transcript:
+            st.caption("Transcript is too short for a hedging index — the "
+                       "ratio needs a few hundred words to mean anything.")
+
     with right:
         st.markdown(theme.section("Intrinsic value distribution", "Valuation"), unsafe_allow_html=True)
         fig, ax = plt.subplots(figsize=(5.5, 3.6))
@@ -1217,6 +1262,117 @@ with tab_guard("Explainability"):
         f"(**${attribution.base_value:.2f}**) toward the final prediction "
         f"(**${attribution.prediction:.2f}**). Green = pushed value up, red = down."
     )
+
+    # ── Plotly waterfall in dollars ──────────────────────────────────────────
+    # SHAP values are in the model's output units, and this model predicts
+    # value per share — so each contribution is literally a dollar amount, not
+    # an abstract importance score. Saying "+$14.20" instead of "0.31" is the
+    # difference between an attribution a reader can argue with and one they
+    # can only accept.
+    _wf = attribution.as_frame().head(12)
+    _wf_fig = go.Figure(go.Waterfall(
+        orientation="v",
+        measure=["absolute"] + ["relative"] * len(_wf) + ["total"],
+        x=["Model base"] + list(_wf["feature"]) + ["Fair value"],
+        y=([attribution.base_value] + [float(v) for v in _wf["contribution"]]
+           + [None]),
+        text=([f"${attribution.base_value:,.2f}"]
+              + [f"{v:+,.2f}" for v in _wf["contribution"]]
+              + [f"${attribution.prediction:,.2f}"]),
+        textposition="outside",
+        connector={"line": {"color": theme.BORDER}},
+        increasing={"marker": {"color": theme.EMERALD_BRIGHT}},
+        decreasing={"marker": {"color": theme.GARNET_BRIGHT}},
+        totals={"marker": {"color": theme.CHAMPAGNE}},
+    ))
+    _wf_fig.update_layout(
+        height=430, margin=dict(l=10, r=10, t=30, b=10),
+        paper_bgcolor=theme.PANEL, plot_bgcolor=theme.PANEL,
+        font=dict(color=theme.TEXT, size=11, family="Inter, sans-serif"),
+        yaxis=dict(title="Value per share ($)", gridcolor=theme.GRID,
+                   zerolinecolor=theme.BORDER),
+        xaxis=dict(tickangle=-35, gridcolor=theme.PANEL),
+        showlegend=False,
+    )
+    st.plotly_chart(_wf_fig, use_container_width=True,
+                    key="shap_waterfall_plotly")
+    _top = _wf.iloc[0] if len(_wf) else None
+    if _top is not None:
+        st.caption(
+            f"Largest single driver: **{_top['feature']}** at "
+            f"{float(_top['contribution']):+,.2f} per share. Contributions are "
+            "in dollars because the model's output is dollars — they sum "
+            "exactly from the base value to the fair value, which is the "
+            "additivity property SHAP guarantees.")
+
+    # ── Conformal prediction bands ───────────────────────────────────────────
+    st.markdown(theme.section("Conformal prediction band", "GUARANTEED COVERAGE"),
+                unsafe_allow_html=True)
+    st.caption(
+        "The p10–p90 band above is *fitted*: the model was trained to place "
+        "80% of outcomes inside it, and whether it does that on data it has "
+        "never seen is a separate question. Split-conformal prediction answers "
+        "it — hold out data the model never trained on, measure the errors it "
+        "makes there, and widen (or narrow) the band by the right amount. The "
+        "result carries a distribution-free, finite-sample coverage guarantee "
+        "that holds whatever shape the errors take.")
+
+    _cf_alpha = st.select_slider(
+        "Target coverage", options=[0.80, 0.90, 0.95], value=0.90,
+        format_func=lambda v: f"{v*100:.0f}%", key="conformal_level")
+    if not getattr(vm, "has_calibration", False):
+        st.info("This model was built without a held-out calibration set, so "
+                "no conformal guarantee can be offered — the fitted band is "
+                "shown alone rather than dressed up as a guaranteed one.")
+    else:
+        _civ = conf_mod.conformalised_quantiles(
+            result.point, result.low, result.high,
+            vm.cal_lo, vm.cal_hi, vm.cal_actual, alpha=1 - _cf_alpha)
+        _raw_cov = conf_mod.empirical_coverage(
+            list(zip(vm.cal_lo, vm.cal_hi)), vm.cal_actual)
+        if _civ is None:
+            st.info("Calibration data was unusable for this level.")
+        else:
+            _q1, _q2, _q3, _q4 = st.columns(4)
+            _q1.markdown(metric_card(
+                "Fitted band (p10–p90)",
+                f"${result.low:,.0f} – ${result.high:,.0f}", sub=True),
+                unsafe_allow_html=True)
+            _q2.markdown(metric_card(
+                f"Conformal band ({_cf_alpha*100:.0f}%)",
+                f"${_civ.lower:,.0f} – ${_civ.upper:,.0f}"),
+                unsafe_allow_html=True)
+            _cov_cls = ("signal-buy" if _raw_cov and _raw_cov >= 0.75
+                        else "signal-sell")
+            _q3.markdown(
+                f'<div class="metric-card"><div class="metric-label">Fitted '
+                f'band, measured</div><div class="{_cov_cls}">'
+                f'{_raw_cov*100:.0f}%</div></div>' if _raw_cov is not None
+                else metric_card("Fitted band, measured", "—", sub=True),
+                unsafe_allow_html=True)
+            _q4.markdown(metric_card(
+                "Conformal guarantee",
+                f"≥ {_civ.finite_sample_coverage*100:.0f}%", sub=True),
+                unsafe_allow_html=True)
+
+            st.markdown(f"_{_civ.reading()}_")
+            if _raw_cov is not None and _raw_cov < _cf_alpha - 0.05:
+                st.warning(
+                    f"The fitted p10–p90 band covered only "
+                    f"{_raw_cov*100:.0f}% of held-out outcomes against the 80% "
+                    "it was trained for — the quantile heads are overconfident "
+                    f"out of sample. That is precisely the gap conformal "
+                    f"closes: it widens the band by "
+                    f"${_civ.quantile_used:,.2f} per side to restore the "
+                    "guarantee, rather than reporting a number that reads "
+                    "tighter than the model has earned.")
+            st.caption(
+                f"Calibrated on {_civ.n_calibration:,} held-out predictions "
+                f"(method: {_civ.method.upper()}). The guarantee is "
+                "*marginal* — it covers this rate across the population, not "
+                "conditionally for any one kind of company — and it assumes "
+                "future data resembles the calibration data, which is exactly "
+                "what a regime change breaks.")
 
     adf = attribution.as_frame()
     wcol, tcol = st.columns([1.3, 1])
@@ -1281,6 +1437,45 @@ with tab_guard("DCF & Scenario"):
                 st.session_state[_k] = _v
     for _k, _v in _dcf_defaults.items():
         st.session_state.setdefault(_k, _v)
+
+    # ── Macro-regime rates ───────────────────────────────────────────────────
+    # A DCF quoted at a hand-typed rate says the same thing in every rate
+    # environment, which cannot be right. This derives the discount rate from
+    # the live macro feed; the sliders remain, and the button hands the
+    # derived values to them so the reader can always take back control.
+    _rr = rdcf_regime.from_macro(macro_now)
+    if _rr is not None:
+        st.markdown(theme.section("Macro-regime discount rate",
+                                  "REGIME SWITCHING"), unsafe_allow_html=True)
+        _rr1, _rr2, _rr3, _rr4 = st.columns(4)
+        _reg_cls = {"Inverted": "signal-sell", "Restrictive": "signal-hold",
+                    "Neutral": "signal-hold", "Easing": "signal-buy"}[_rr.regime]
+        _rr1.markdown(
+            f'<div class="metric-card"><div class="metric-label">Regime</div>'
+            f'<div class="{_reg_cls}">{_rr.regime}</div></div>',
+            unsafe_allow_html=True)
+        _rr2.markdown(metric_card("Derived WACC", f"{_rr.wacc*100:.2f}%"),
+                      unsafe_allow_html=True)
+        _rr3.markdown(metric_card("Terminal growth cap",
+                                  f"{_rr.terminal_growth*100:.2f}%", sub=True),
+                      unsafe_allow_html=True)
+        _rr4.markdown(metric_card("10y–2y curve",
+                                  f"{_rr.yield_curve:+.2f} pts", sub=True),
+                      unsafe_allow_html=True)
+        st.markdown(f"_{_rr.reading()}_")
+        for _n in _rr.notes:
+            st.caption(_n)
+        if st.button("Apply regime rates to the sliders", key="dcf_apply_regime"):
+            st.session_state["dcf_pending_load"] = {
+                "dcf_wacc": round(_rr.wacc * 100, 2),
+                "dcf_tg": round(_rr.terminal_growth * 100, 2),
+            }
+            st.rerun()
+        with st.expander("What a policy move would imply for this rate"):
+            st.dataframe(pd.DataFrame([
+                {"Policy shock": f"{bp:+d}bp", "Implied WACC": f"{w*100:.2f}%"}
+                for bp, w in rdcf_regime.sensitivity_to_policy(_rr)
+            ]), hide_index=True, width="stretch")
 
     c1, c2, c3, c4 = st.columns(4)
     wacc = c1.slider("WACC (%)", 4.0, 20.0, step=0.25, key="dcf_wacc") / 100
@@ -1504,7 +1699,7 @@ with tab_guard("Valuation"):
     except Exception:
         _cf_q = None
     _cf_snap = snap_mod.compute(md.history)
-    _conf = conf_mod.compute(
+    _conf = confl_mod.compute(
         ml_gap=analysis.get("raw_mos"),
         dcf_gap=_cf_dcf_gap,
         piotroski=_cf_q.piotroski if _cf_q else None,
@@ -1792,6 +1987,143 @@ with tab_guard("Guardrails"):
                  ". Treat any 'undervalued' reading with caution — possible value trap.")
     else:
         st.success("✅ No distress/manipulation guardrails triggered.")
+
+    # ── Beneish 8-variable drill-down ────────────────────────────────────────
+    if qs.beneish is not None:
+        st.markdown(theme.section("Beneish M-Score — the eight components",
+                                  "FORENSIC DRILL-DOWN"), unsafe_allow_html=True)
+        st.caption(
+            "The M-score alone says 'manipulation risk' without saying why. "
+            "These are the eight symptoms Beneish fitted it from, each shown "
+            "as its contribution to the total — the difference between a "
+            "number and a lead worth following in the filings.")
+        _bd = qs.beneish
+        _bkeys = list(_bd.contributions)
+        _bvals = [_bd.contributions[k] for k in _bkeys]
+        _bfig = go.Figure(go.Bar(
+            x=_bvals, y=[f"{k} — {quality_mod.BENEISH_TERMS[k][1]}"
+                         for k in _bkeys],
+            orientation="h",
+            marker_color=[theme.GARNET_BRIGHT if v > 0 else theme.EMERALD_BRIGHT
+                          for v in _bvals],
+            text=[f"{v:+.2f}" for v in _bvals], textposition="outside",
+            hovertext=[quality_mod.BENEISH_TERMS[k][2] for k in _bkeys],
+            hoverinfo="text",
+        ))
+        _bfig.update_layout(
+            height=360, margin=dict(l=10, r=30, t=20, b=10),
+            paper_bgcolor=theme.PANEL, plot_bgcolor=theme.PANEL,
+            font=dict(color=theme.TEXT, size=11, family="Inter, sans-serif"),
+            xaxis=dict(title="Contribution to M-score", gridcolor=theme.GRID,
+                       zerolinecolor=theme.BORDER),
+            yaxis=dict(autorange="reversed"), showlegend=False,
+        )
+        st.plotly_chart(_bfig, use_container_width=True, key="beneish_bars")
+        st.markdown(f"_{_bd.reading()}_")
+        st.dataframe(pd.DataFrame([{
+            "Index": k,
+            "What it asks": quality_mod.BENEISH_TERMS[k][1],
+            "Value": f"{_bd.components[k]:.3f}",
+            "Weight": f"{quality_mod.BENEISH_TERMS[k][0]:+.3f}",
+            "Contribution": f"{_bd.contributions[k]:+.3f}",
+            "Measured": "no — held neutral" if k in _bd.missing else "yes",
+        } for k in _bkeys]), hide_index=True, width="stretch")
+
+    # ── Altman Z'' for non-manufacturing / tech ──────────────────────────────
+    if qs.altman_zz is not None:
+        st.markdown(theme.section("Altman Z'' — non-manufacturing variant",
+                                  "DISTRESS"), unsafe_allow_html=True)
+        _zz = qs.altman_zz
+        _z1, _z2, _z3 = st.columns(3)
+        _zcls = {"Safe": "signal-buy", "Grey": "signal-hold",
+                 "Distress": "signal-sell"}[_zz.zone]
+        _z1.markdown(
+            f'<div class="metric-card"><div class="metric-label">Z\'\' score'
+            f'</div><div class="{_zcls}">{_zz.z:.2f} · {_zz.zone}</div></div>',
+            unsafe_allow_html=True)
+        _z2.markdown(metric_card("Mapped distress likelihood",
+                                 f"{_zz.distress_prob*100:.0f}%", sub=True),
+                     unsafe_allow_html=True)
+        _z3.markdown(metric_card(
+            "Original Z (manufacturing)",
+            f"{qs.altman_z:.2f} · {qs.altman_zone}" if qs.altman_z else "—",
+            sub=True), unsafe_allow_html=True)
+        st.markdown(f"_{_zz.reading()}_")
+        st.dataframe(pd.DataFrame([
+            {"Term": "X1 · working capital / assets", "Value": f"{_zz.x1:.3f}",
+             "Weight": "6.56", "Contribution": f"{6.56*_zz.x1:+.3f}"},
+            {"Term": "X2 · retained earnings / assets", "Value": f"{_zz.x2:.3f}",
+             "Weight": "3.26", "Contribution": f"{3.26*_zz.x2:+.3f}"},
+            {"Term": "X3 · EBIT / assets", "Value": f"{_zz.x3:.3f}",
+             "Weight": "6.72", "Contribution": f"{6.72*_zz.x3:+.3f}"},
+            {"Term": "X4 · book equity / liabilities", "Value": f"{_zz.x4:.3f}",
+             "Weight": "1.05", "Contribution": f"{1.05*_zz.x4:+.3f}"},
+        ]), hide_index=True, width="stretch")
+
+    # ── Tail risk: CVaR-95 ───────────────────────────────────────────────────
+    st.markdown(theme.section("Tail risk — expected shortfall (CVaR)",
+                              "RISK"), unsafe_allow_html=True)
+    st.caption(
+        "Value at Risk answers 'how bad is a bad day' and stops where the "
+        "question gets interesting. **CVaR averages the days beyond it** — "
+        "portfolios are destroyed inside the tail, not at its edge.")
+    _cv1, _cv2 = st.columns(2)
+    _cv_level = _cv1.select_slider("Confidence", options=[0.90, 0.95, 0.99],
+                                   value=0.95,
+                                   format_func=lambda v: f"{v*100:.0f}%",
+                                   key="cvar_level")
+    _cv_hz = _cv2.select_slider("Holding period (trading days)",
+                                options=[1, 5, 10, 21], value=1,
+                                key="cvar_horizon")
+    _tail = risk_mod.expected_shortfall(
+        md.history["Close"] if not md.history.empty else None,
+        level=float(_cv_level), horizon_days=int(_cv_hz))
+    if _tail is None:
+        st.info("Not enough price history to measure a tail on this name.")
+    else:
+        _t1, _t2, _t3, _t4 = st.columns(4)
+        _t1.markdown(metric_card(f"VaR {_cv_level*100:.0f}%",
+                                 f"{_tail.var_pct:.2f}%", sub=True),
+                     unsafe_allow_html=True)
+        _t2.markdown(
+            f'<div class="metric-card"><div class="metric-label">CVaR '
+            f'{_cv_level*100:.0f}% (expected shortfall)</div>'
+            f'<div class="signal-sell">{_tail.cvar_pct:.2f}%</div></div>',
+            unsafe_allow_html=True)
+        _t3.markdown(metric_card("Worst observed",
+                                 f"{_tail.worst_observed_pct:.2f}%", sub=True),
+                     unsafe_allow_html=True)
+        _var_d, _cvar_d = _tail.dollars(10_000)
+        _t4.markdown(metric_card("On $10,000", f"${_cvar_d:,.0f}", sub=True),
+                     unsafe_allow_html=True)
+        st.markdown(f"_{_tail.reading()}_")
+
+    # ── Ownership concentration (HHI) ────────────────────────────────────────
+    try:
+        _own_h = insider_mod.get_ownership(tk)
+        _hhi = risk_mod.ownership_hhi(getattr(_own_h, "holders", []) or [])
+    except Exception:
+        _hhi = None
+    if _hhi is not None:
+        st.markdown(theme.section("Ownership concentration (HHI)",
+                                  "WHO HOLDS IT"), unsafe_allow_html=True)
+        _h1, _h2, _h3 = st.columns(3)
+        _hcls = {"Highly concentrated": "signal-sell",
+                 "Concentrated": "signal-sell", "Moderate": "signal-hold",
+                 "Dispersed": "signal-buy"}[_hhi.concentration_label]
+        _h1.markdown(
+            f'<div class="metric-card"><div class="metric-label">Concentration'
+            f'</div><div class="{_hcls}">{_hhi.concentration_label}</div></div>',
+            unsafe_allow_html=True)
+        _h2.markdown(metric_card("Effective holders",
+                                 f"{_hhi.effective_holders:.1f}", sub=True),
+                     unsafe_allow_html=True)
+        _h3.markdown(metric_card("Top-10 own",
+                                 f"{_hhi.disclosed_pct:.1f}%", sub=True),
+                     unsafe_allow_html=True)
+        st.markdown(f"_{_hhi.reading()}_")
+        for _n in _hhi.notes:
+            st.caption(_n)
 
     if qs.piotroski_detail:
         st.markdown(theme.section("Piotroski components"), unsafe_allow_html=True)

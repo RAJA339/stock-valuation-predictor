@@ -1,5 +1,6 @@
 # ── Core app / ML ────────────────────────────────────────────────────────────
 streamlit[auth]>=1.42.0   # native OIDC sign-in (st.login/st.user) — pulls Authlib
+plotly>=5.18.0            # interactive waterfall / forensic drill-down charts
 pandas>=2.0.0
 numpy>=1.26.0
 xgboost>=2.0.0            # native quantile (pinball) objective for value ranges

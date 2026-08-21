@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 import xgboost as xgb
@@ -39,6 +41,18 @@ class ValuationModel:
     rmse: float
     train_medians: pd.Series  # for NaN imputation at inference time
     feature_std: pd.Series    # for Monte-Carlo perturbation
+    #: Held-out predictions kept for conformal calibration. The quantile band
+    #: is *fitted*, so whether it covers on unseen data is an empirical
+    #: question; answering it needs the model's own errors on data it never
+    #: trained on, which is exactly this. See :mod:`svp.models.conformal`.
+    cal_actual: Optional[np.ndarray] = None
+    cal_point: Optional[np.ndarray] = None
+    cal_lo: Optional[np.ndarray] = None
+    cal_hi: Optional[np.ndarray] = None
+
+    @property
+    def has_calibration(self) -> bool:
+        return self.cal_actual is not None and len(self.cal_actual) > 0
 
 
 @dataclass
@@ -138,6 +152,15 @@ def train_model(seed: int = 42) -> ValuationModel:
             qm = point
         quantiles[q] = qm
 
+    # Keep the held-out band alongside the truth so conformal calibration has
+    # genuine out-of-sample errors to work from rather than training residuals,
+    # which are optimistic by construction.
+    try:
+        cal_lo = np.asarray(quantiles[QUANTILES[0]].predict(X_test), dtype=float)
+        cal_hi = np.asarray(quantiles[QUANTILES[-1]].predict(X_test), dtype=float)
+    except Exception:
+        cal_lo = cal_hi = None
+
     return ValuationModel(
         point=point,
         quantiles=quantiles,
@@ -146,6 +169,10 @@ def train_model(seed: int = 42) -> ValuationModel:
         rmse=rmse,
         train_medians=X_train.median(),
         feature_std=X_train.std(),
+        cal_actual=np.asarray(y_test, dtype=float),
+        cal_point=np.asarray(y_pred, dtype=float),
+        cal_lo=cal_lo,
+        cal_hi=cal_hi,
     )
 
 
