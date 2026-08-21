@@ -88,7 +88,7 @@ from svp.analytics import (
     confluence as confl_mod, volume_profile as vp_mod, amd as amd_mod,
     fvg as fvg_mod, risk as risk_mod, transcript as tscript_mod,
     structure as struct_mod, candles as candle_mod,
-    regime_state as rstate_mod,
+    regime_state as rstate_mod, dataquality as dq_mod,
 )
 from svp import lwchart as lwc_mod
 from svp.data import intraday as intraday_mod
@@ -978,6 +978,16 @@ with tab_guard("Structure Desk"):
         _sd_show_ob = _sd3.toggle("Order blocks", value=True, key="sd_ob")
         _sd_show_vp = _sd4.toggle("Volume profile", value=True, key="sd_vp")
 
+        # ── Reject bad prints before anything reads the data ─────────────────
+        # A single corrupt bar does not just distort the chart: it forms
+        # phantom order blocks at prices the stock never traded, widens the
+        # volume profile's range so every bin is wrong, and sets whatever
+        # axis is derived from it. Cleaning here, once, at the top, is the
+        # fix; clipping each symptom downstream was not.
+        _sd_hist, _dq = dq_mod.clean(_sd_hist)
+        if not _dq.is_clean:
+            st.warning("⚠️ " + _dq.note())
+
         _sd_bars = {"6M": 126, "1Y": 252, "2Y": 504, "5Y": 1260}[_sd_range]
         _sd_win = _sd_hist.tail(_sd_bars)
 
@@ -1013,9 +1023,15 @@ with tab_guard("Structure Desk"):
         _highs = _sd_win["High"].astype(float)
         _y_lo = float(_lows.quantile(0.005))
         _y_hi = float(_highs.quantile(0.995))
-        # Whatever else is clipped, the latest price must be on screen.
-        _y_lo = min(_y_lo, price, float(_sd_win["Close"].iloc[-1]))
-        _y_hi = max(_y_hi, price, float(_sd_win["Close"].iloc[-1]))
+        # The latest price is pulled into view only when it is plausible.
+        # Forcing it in unconditionally was a bug: when the corrupt bar *is*
+        # the latest one, that line dragged the axis straight back out and
+        # undid the percentile range entirely.
+        _span = max(_y_hi - _y_lo, 1e-9)
+        _last_close = float(_sd_win["Close"].iloc[-1])
+        for _p in (price, _last_close):
+            if _y_lo - _span <= _p <= _y_hi + _span:
+                _y_lo, _y_hi = min(_y_lo, _p), max(_y_hi, _p)
         _pad = (_y_hi - _y_lo) * 0.06 or 1.0
         _y_range = [_y_lo - _pad, _y_hi + _pad]
         _clipped_bars = int(((_lows < _y_range[0]) | (_highs > _y_range[1])).sum())
