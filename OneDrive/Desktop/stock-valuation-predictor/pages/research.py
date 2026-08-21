@@ -82,7 +82,7 @@ from svp.analytics import (
     screener as screener_mod, indicators as ind_mod, accuracy as acc_mod,
     microstructure as micro_mod, quant as quant_mod,
     fracdiff as fracdiff_mod, flow as flow_mod, snapshot as snap_mod,
-    confluence as conf_mod,
+    confluence as conf_mod, volume_profile as vp_mod, amd as amd_mod,
 )
 from svp import lwchart as lwc_mod
 from svp.data import intraday as intraday_mod
@@ -728,7 +728,13 @@ with tab_guard("Chart Studio"):
         with cs4:
             _log = st.toggle("Log scale", value=_tf in ("5Y", "10Y"), key="cs_log")
 
-        ov1, ov2 = st.columns([1.2, 2.2])
+        ov1, ov2, ov3 = st.columns([1.2, 1.2, 1.8])
+        with ov3:
+            _show_vp = st.toggle(
+                "Volume profile", value=False, key="cs_vp",
+                help="Bins the selected range's traded volume by price and "
+                     "draws the point of control and value area on the chart. "
+                     "The range above is the fixed range.")
         with ov1:
             _show_val = st.toggle(
                 "Valuation overlay", value=True, key="cs_val",
@@ -778,10 +784,27 @@ with tab_guard("Chart Studio"):
                 mos=result.point * (1 - _mos_pct / 100) if _mos_pct else None,
             )
 
+        # ── Fixed-range volume profile ───────────────────────────────────────
+        # "Fixed range" is the window selected above: the profile describes
+        # exactly the bars on screen, so what the chart shows and what the
+        # levels describe can never drift apart.
+        _vp = vp_mod.profile(_win) if _show_vp else None
+        _vp_levels = []
+        if _vp is not None:
+            _vp_levels = [
+                {"price": round(_vp.poc, 2), "color": theme.CHAMPAGNE,
+                 "style": 0, "title": f"POC {_vp.poc:,.2f}"},
+                {"price": round(_vp.vah, 2), "color": theme.PEARL_MUTED,
+                 "style": 2, "title": f"VAH {_vp.vah:,.2f}"},
+                {"price": round(_vp.val, 2), "color": theme.PEARL_MUTED,
+                 "style": 2, "title": f"VAL {_vp.val:,.2f}"},
+            ]
+
         _built = lwc_mod.build_chart_html(
             _win,
             kind={"Candles": "candles", "Line": "line", "Area": "area"}[_kind_label],
-            overlays=_ovl, rsi=_rsi_series, zones=_zones, log_scale=_log,
+            overlays=_ovl, rsi=_rsi_series, zones=_zones, levels=_vp_levels,
+            log_scale=_log,
         )
         if _built is None:
             st.info(f"The {_tf} window holds too few bars to chart — "
@@ -794,6 +817,64 @@ with tab_guard("Chart Studio"):
                 f"{md.source} · valuation levels are estimates from this app's "
                 "models, not price targets. Educational use only — not financial "
                 "advice.")
+
+        if _show_vp:
+            st.markdown(theme.section("Fixed-range volume profile",
+                                      "VOLUME AT PRICE"), unsafe_allow_html=True)
+            if _vp is None:
+                st.info("This range has no usable volume to profile — pick a "
+                        "longer window, or the feed has no volume for this name.")
+            else:
+                _p1, _p2, _p3, _p4 = st.columns(4)
+                _p1.markdown(metric_card("Point of control",
+                                         f"${_vp.poc:,.2f}"),
+                             unsafe_allow_html=True)
+                _p2.markdown(metric_card("Value area high",
+                                         f"${_vp.vah:,.2f}", sub=True),
+                             unsafe_allow_html=True)
+                _p3.markdown(metric_card("Value area low",
+                                         f"${_vp.val:,.2f}", sub=True),
+                             unsafe_allow_html=True)
+                _pos = _vp.position_of(price)
+                _pos_cls = {"inside value": "signal-hold",
+                            "above value": "signal-sell",
+                            "below value": "signal-buy"}[_pos]
+                _p4.markdown(
+                    f'<div class="metric-card"><div class="metric-label">'
+                    f'Price vs value</div><div class="{_pos_cls}">'
+                    f'{_pos.title()}</div></div>', unsafe_allow_html=True)
+
+                _vg1, _vg2 = st.columns([1.7, 1])
+                with _vg1:
+                    fig, ax = plt.subplots(figsize=(5.6, 3.6))
+                    theme.style_axes(fig, ax)
+                    _cols = [theme.CHAMPAGNE if abs(m - _vp.poc) < 1e-9
+                             else (theme.EMERALD_BRIGHT
+                                   if _vp.val <= m <= _vp.vah else theme.PEARL_FAINT)
+                             for m in _vp.bin_prices]
+                    _h = ((_vp.high - _vp.low) / max(len(_vp.bin_prices), 1)) * 0.9
+                    ax.barh(_vp.bin_prices, _vp.bin_volumes, height=_h,
+                            color=_cols, edgecolor="none")
+                    ax.axhline(price, color=theme.PEARL, lw=1.2, ls="--",
+                               label=f"Price ${price:,.2f}")
+                    ax.set_xlabel("Volume traded"); ax.set_ylabel("Price ($)")
+                    ax.legend(facecolor=theme.PANEL, labelcolor=theme.TEXT,
+                              fontsize=8)
+                    st.pyplot(fig, width="stretch"); plt.close(fig)
+                with _vg2:
+                    st.markdown(f"_{_vp.reading(price)}_")
+                    st.caption(
+                        f"{_vp.bar_count} bars · "
+                        f"{_vp.total_volume/1e6:,.1f}M shares · champagne marks "
+                        "the point of control, emerald the value area. Each "
+                        "bar's volume is spread across its high–low span, not "
+                        "dumped at its close.")
+                    if _vp.lvn:
+                        st.caption(
+                            "Low-volume shelves near "
+                            + ", ".join(f"${x:,.0f}" for x in _vp.lvn[:4])
+                            + " — price moved through these quickly, so they "
+                              "offer little traded history as reference.")
 
         # ── Technical snapshot ───────────────────────────────────────────────
         _snap = snap_mod.compute(_hist)
@@ -2865,6 +2946,74 @@ with tab_guard("Microstructure"):
         "and, where it is a claim about the future, a confidence interval. "
         "Several of these are real anomalies; none of them is a guaranteed edge."
     )
+
+    # ── AMD — accumulation, manipulation, distribution ───────────────────────
+    st.markdown(theme.section("AMD — accumulation · manipulation · distribution",
+                              "Market structure"), unsafe_allow_html=True)
+    st.caption(
+        "The framework says a move has three legs: price coils in a range, "
+        "breaks just far enough past it to trip the stops resting there and "
+        "closes back inside, then makes the real move the other way. The first "
+        "two legs are mechanical and detectable. The third is a **claim** — so "
+        "every sequence found in this name's history is scored on whether "
+        "distribution actually ran the way the framework says, and the rate is "
+        "quoted with a confidence interval. Unless that interval clears 50%, "
+        "this is a coin flip and says so.")
+
+    _amd_c1, _amd_c2, _amd_c3 = st.columns(3)
+    _amd_acc = _amd_c1.slider("Accumulation window (bars)", 10, 40, 20, 5,
+                              key="amd_acc")
+    _amd_win = _amd_c2.slider("Sweep must occur within (bars)", 3, 20, 10, 1,
+                              key="amd_win")
+    _amd_hz = _amd_c3.slider("Distribution horizon (bars)", 3, 30, 10, 1,
+                             key="amd_hz")
+    _amd = amd_mod.detect(md.history, acc_bars=int(_amd_acc),
+                          manip_window=int(_amd_win), horizon=int(_amd_hz))
+    if _amd is None:
+        st.info("Not enough daily history on this name to look for AMD "
+                "sequences.")
+    else:
+        _ph_cls = {"Accumulation": "signal-hold", "Manipulation": "signal-buy",
+                   "None": "metric-sub"}[_amd.current_phase]
+        _a1, _a2 = st.columns([1, 2.4])
+        _a1.markdown(
+            f'<div class="metric-card"><div class="metric-label">Current '
+            f'structure</div><div class="{_ph_cls}">{_amd.current_phase}'
+            f'</div></div>', unsafe_allow_html=True)
+        with _a2:
+            if _amd.current_note:
+                st.markdown(f"_{_amd.current_note}_")
+
+        _b1, _b2, _b3 = st.columns(3)
+        _b1.markdown(metric_card("Sequences found", f"{_amd.n_events}",
+                                 sub=True), unsafe_allow_html=True)
+        _rate_txt = (f"{_amd.rate*100:.0f}%" if _amd.n_events >= amd_mod.MIN_EVENTS
+                     else "—")
+        _b2.markdown(metric_card("Distribution followed", _rate_txt, sub=True),
+                     unsafe_allow_html=True)
+        _ci_txt = (f"{_amd.ci_low*100:.0f}–{_amd.ci_high*100:.0f}%"
+                   if _amd.n_events >= amd_mod.MIN_EVENTS else "—")
+        _b3.markdown(metric_card("95% interval", _ci_txt, sub=True),
+                     unsafe_allow_html=True)
+        st.markdown(f"**{_amd.verdict}**")
+
+        if _amd.events:
+            with st.expander(f"The {len(_amd.events)} sequences, most recent first"):
+                st.dataframe(pd.DataFrame([{
+                    "Accumulation": f"{e.acc_start} → {e.acc_end}",
+                    "Swept": e.sweep_date,
+                    "Direction": ("Low swept (bullish)" if e.direction == "bullish"
+                                  else "High swept (bearish)"),
+                    "Range": f"${e.acc_low:,.2f}–${e.acc_high:,.2f}",
+                    "Sweep hit": f"${e.sweep_extreme:,.2f}",
+                    f"Next {_amd.horizon} bars": f"{e.forward_return_pct:+.1f}%",
+                    "Followed": "yes" if e.followed_through else "no",
+                } for e in reversed(_amd.events)]),
+                    hide_index=True, width="stretch")
+                st.caption(
+                    "Sequences are taken non-overlapping — the bars after one "
+                    "sweep are not reused as the setup for the next — so the "
+                    "interval is not one move counted several times.")
 
     # ── Overnight vs intraday ────────────────────────────────────────────────
     _split = micro_mod.overnight_intraday_split(md.history)

@@ -144,6 +144,7 @@ def build_chart_html(
     overlays: Optional[dict[str, pd.Series]] = None,
     rsi: Optional[pd.Series] = None,
     zones: Optional[FairValueZones] = None,
+    levels: Optional[list[dict]] = None,
     log_scale: bool = False,
     height: int = 480,
 ) -> Optional[ChartHTML]:
@@ -165,7 +166,11 @@ def build_chart_html(
     ]
     overlay_series = [o for o in overlay_series if len(o["data"]) >= 2]
     rsi_data = _line_data(rsi.reindex(data.index)) if rsi is not None else []
+    # Valuation zones and any caller-supplied levels (volume-profile POC and
+    # value area, say) share one price-line list — they are the same kind of
+    # object on the price axis, and the chart should not care which is which.
     price_lines = zones.lines() if zones is not None else []
+    price_lines += [dict(ln) for ln in (levels or [])]
 
     payload = json.dumps({
         "kind": kind,
