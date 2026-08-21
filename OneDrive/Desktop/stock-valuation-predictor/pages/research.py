@@ -1003,27 +1003,53 @@ with tab_guard("Structure Desk"):
 
         _x0, _x1 = _sd_win.index[0], _sd_win.index[-1]
 
+        # The visible price range, fixed from the candles themselves. Without
+        # this every stray shape dictates the scale: a single order block a
+        # long way from spot stretched the axis and squashed the candles into
+        # a band, which is what made the first version of this chart
+        # unreadable. Overlays may now fall outside and simply clip.
+        _y_lo = float(_sd_win["Low"].min())
+        _y_hi = float(_sd_win["High"].max())
+        _pad = (_y_hi - _y_lo) * 0.06 or 1.0
+        _y_range = [_y_lo - _pad, _y_hi + _pad]
+
+        def _in_view(bottom: float, top: float) -> bool:
+            """True when a price band overlaps what is actually on screen."""
+            return top >= _y_range[0] and bottom <= _y_range[1]
+
         # Order blocks as shaded zones, demand green / supply red, untested
-        # drawn solid and mitigated ones faded — the status is the point.
+        # solid and mitigated faded. Only blocks that overlap the visible
+        # range are drawn, and each starts at the bar that formed it rather
+        # than at the left edge — a block did not exist before it existed.
         if _sd_show_ob and _smap is not None:
-            for _b in _smap.nearest_blocks(price, n=8):
-                _fill = ("rgba(31,168,124,0.20)" if _b.kind == "demand"
-                         else "rgba(212,95,83,0.20)")
+            _vis_blocks = [b for b in _smap.nearest_blocks(price, n=14)
+                           if _in_view(b.bottom, b.top)][:5]
+            for _bi, _b in enumerate(_vis_blocks):
+                _fill = ("rgba(31,168,124,0.18)" if _b.kind == "demand"
+                         else "rgba(212,95,83,0.18)")
                 if _b.mitigated:
-                    _fill = _fill.replace("0.20", "0.08")
+                    _fill = _fill.replace("0.18", "0.07")
+                _bx = _b.ts if _b.ts is not None else _x0
+                if _bx < _x0:
+                    _bx = _x0
                 _fig.add_shape(
-                    type="rect", x0=_x0, x1=_x1, y0=_b.bottom, y1=_b.top,
+                    type="rect", x0=_bx, x1=_x1, y0=_b.bottom, y1=_b.top,
                     fillcolor=_fill, line=dict(width=0), layer="below",
                     row=1, col=1)
+                # Label inside the band at its own left edge. Anchoring every
+                # label to the right edge stacked them into an illegible pile.
                 _fig.add_annotation(
-                    x=_x1, y=_b.top, xref="x", yref="y",
-                    text=f"{_b.label} · {_b.impulse_volume_ratio:.1f}×",
-                    showarrow=False, font=dict(size=9, color=theme.MUTED),
-                    xanchor="right", yanchor="bottom", row=1, col=1)
+                    x=_bx, y=(_b.top + _b.bottom) / 2, xref="x", yref="y",
+                    text=f"{'D' if _b.kind == 'demand' else 'S'} "
+                         f"{_b.impulse_volume_ratio:.1f}× · {_b.status}",
+                    showarrow=False, font=dict(size=8, color=theme.MUTED),
+                    xanchor="left", yanchor="middle", row=1, col=1)
 
-        # Structure events inside the window.
+        # Structure events inside the window. Capped at the most recent
+        # handful: a decade of breaks annotated at once is a wall of labels,
+        # and the full list is in the table below.
         if _smap is not None:
-            for _e in _smap.events:
+            for _e in _smap.events[-12:]:
                 # The event carries the frame's own index label, so this
                 # compares like with like. Re-parsing the display date built a
                 # tz-naive stamp and comparing it against a tz-aware price
@@ -1041,8 +1067,15 @@ with tab_guard("Structure Desk"):
                     font=dict(size=9, color=theme.TEXT),
                     bgcolor=theme.PANEL, row=1, col=1)
 
-        # The most recent validated pattern, with its anchored VWAP.
-        _last_pat = _pats[-1] if _pats else None
+        # Anchored VWAP of the most recent pattern **inside the window**. An
+        # anchor from before the window drew a σ cone accumulated over years
+        # across a few months of chart — visually dominant and about a period
+        # the reader cannot see. If no pattern falls in view, none is drawn
+        # and the caption says why.
+        _win_pats = [p for p in _pats
+                     if p.start_idx < len(_sd_hist)
+                     and _sd_hist.index[p.start_idx] >= _x0]
+        _last_pat = _win_pats[-1] if _win_pats else None
         if _last_pat is not None:
             _av = candle_mod.anchored_vwap(_sd_hist,
                                            anchor_idx=_last_pat.start_idx)
@@ -1054,14 +1087,17 @@ with tab_guard("Structure Desk"):
                         name=f"AVWAP from {_av.anchor_date}",
                         line=dict(color=theme.CHAMPAGNE, width=2)),
                         row=1, col=1)
-                    for _band, _dash in ((_av.upper1, "dot"),
-                                         (_av.lower1, "dot"),
-                                         (_av.upper2, "dash"),
-                                         (_av.lower2, "dash")):
+                    for _band, _nm, _dash in (
+                            (_av.upper1, "+1σ", "dot"),
+                            (_av.lower1, "−1σ", "dot"),
+                            (_av.upper2, "+2σ", "dash"),
+                            (_av.lower2, "−2σ", "dash")):
                         _bs = _band[_band.index >= _x0]
+                        if len(_bs) < 2:
+                            continue
                         _fig.add_trace(go.Scatter(
                             x=_bs.index, y=_bs.values, mode="lines",
-                            showlegend=False, hoverinfo="skip",
+                            name=_nm, showlegend=False, hoverinfo="skip",
                             line=dict(color=theme.PEARL_FAINT, width=1,
                                       dash=_dash)), row=1, col=1)
 
@@ -1102,9 +1138,25 @@ with tab_guard("Structure Desk"):
         )
         _fig.update_xaxes(gridcolor=theme.GRID, row=1, col=1)
         _fig.update_xaxes(showgrid=False, showticklabels=False, row=1, col=2)
+        # Pinning the range is what keeps the candles legible: overlays that
+        # fall outside are clipped instead of rescaling the whole chart.
         _fig.update_yaxes(gridcolor=theme.GRID, side="right",
-                          title_text="Price ($)", row=1, col=1)
+                          title_text="Price ($)", range=_y_range,
+                          autorange=False, row=1, col=1)
         st.plotly_chart(_fig, use_container_width=True, key="structure_desk")
+        _drawn = len([b for b in _smap.nearest_blocks(price, n=14)
+                      if _in_view(b.bottom, b.top)][:5]) if _smap else 0
+        st.caption(
+            f"Price axis is fixed to this window's range "
+            f"(${_y_range[0]:,.2f}–${_y_range[1]:,.2f}); zones outside it are "
+            f"clipped rather than rescaling the chart. {_drawn} order block"
+            f"{'' if _drawn == 1 else 's'} in view, each drawn from the bar "
+            "that formed it."
+            + ("" if _last_pat is not None else
+               " No validated three-bar pattern falls inside this window, so "
+               "no anchored VWAP is drawn — anchoring to one from outside the "
+               "window would plot a σ envelope built from a period you cannot "
+               "see."))
 
         # ── Readings ─────────────────────────────────────────────────────────
         if _smap is not None:

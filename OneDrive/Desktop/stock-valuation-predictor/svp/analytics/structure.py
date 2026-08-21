@@ -96,6 +96,11 @@ class OrderBlock:
     mitigated: bool = False
     mitigation_date: str = ""
     touches: int = 0
+    #: The frame's own index label for the forming bar. A block exists from
+    #: when it formed, not from the beginning of whatever window is on screen,
+    #: and drawing it needs a stamp comparable with the price index — the same
+    #: reason StructureEvent carries one.
+    ts: object = None
 
     @property
     def mid(self) -> float:
@@ -220,7 +225,7 @@ def _find_order_block(o: np.ndarray, h: np.ndarray, low_a: np.ndarray,
                 top=float(max(o[j], c[j], h[j] if want_down else h[j])),
                 bottom=float(min(o[j], c[j], low_a[j])),
                 date=str(idx[j])[:10], idx=j,
-                impulse_volume_ratio=float(ratio),
+                impulse_volume_ratio=float(ratio), ts=idx[j],
             )
     return None
 

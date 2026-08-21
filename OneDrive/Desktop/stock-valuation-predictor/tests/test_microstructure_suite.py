@@ -82,6 +82,20 @@ class TestTimezoneAwareInput:
         for e in sm.events:
             assert e.ts in df.index
 
+    def test_order_blocks_carry_a_comparable_timestamp(self):
+        """
+        Blocks are drawn from the bar that formed them, so they need the same
+        comparable stamp events do — anchoring them to the window's left edge
+        would claim a block existed before it did.
+        """
+        df = self._aware()
+        sm = ST.analyse(df)
+        assert sm.blocks
+        for b in sm.blocks:
+            assert b.ts is not None
+            assert b.ts in df.index
+            assert df.index[0] <= b.ts <= df.index[-1]
+
     def test_every_analytics_module_accepts_tz_aware_frames(self):
         df = self._aware(n=600, seed=5)
         assert ST.analyse(df) is not None
