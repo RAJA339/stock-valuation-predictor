@@ -83,6 +83,7 @@ from svp.analytics import (
     microstructure as micro_mod, quant as quant_mod,
     fracdiff as fracdiff_mod, flow as flow_mod, snapshot as snap_mod,
     confluence as conf_mod, volume_profile as vp_mod, amd as amd_mod,
+    fvg as fvg_mod,
 )
 from svp import lwchart as lwc_mod
 from svp.data import intraday as intraday_mod
@@ -735,6 +736,11 @@ with tab_guard("Chart Studio"):
                 help="Bins the selected range's traded volume by price and "
                      "draws the point of control and value area on the chart. "
                      "The range above is the fixed range.")
+            _show_fvg = st.toggle(
+                "FVG / IFVG bands", value=False, key="cs_fvg",
+                help="Draws the fair value gaps nearest the current price — "
+                     "untouched ones dashed, inverted ones dotted. Measured "
+                     "in full on the Microstructure tab.")
         with ov1:
             _show_val = st.toggle(
                 "Valuation overlay", value=True, key="cs_val",
@@ -800,11 +806,25 @@ with tab_guard("Chart Studio"):
                  "style": 2, "title": f"VAL {_vp.val:,.2f}"},
             ]
 
+        # Gaps are found on the full history — a band formed before the
+        # visible window still governs price inside it — then only the ones
+        # near the current price are drawn.
+        _fvg_levels = []
+        if _show_fvg:
+            _cs_fvg = fvg_mod.detect(_hist)
+            if _cs_fvg is not None:
+                _cs_bands = (fvg_mod.active_ifvgs(_cs_fvg, price, n=2)
+                             + fvg_mod.unfilled_gaps(_cs_fvg, price, n=2))
+                _fvg_levels = fvg_mod.zone_levels(_cs_bands)
+                for _ln in _fvg_levels:
+                    _ln["color"] = (theme.GARNET_BRIGHT if "IFVG" in _ln["title"]
+                                    else theme.PEARL_MUTED)
+
         _built = lwc_mod.build_chart_html(
             _win,
             kind={"Candles": "candles", "Line": "line", "Area": "area"}[_kind_label],
-            overlays=_ovl, rsi=_rsi_series, zones=_zones, levels=_vp_levels,
-            log_scale=_log,
+            overlays=_ovl, rsi=_rsi_series, zones=_zones,
+            levels=_vp_levels + _fvg_levels, log_scale=_log,
         )
         if _built is None:
             st.info(f"The {_tf} window holds too few bars to chart — "
@@ -3014,6 +3034,64 @@ with tab_guard("Microstructure"):
                     "Sequences are taken non-overlapping — the bars after one "
                     "sweep are not reused as the setup for the next — so the "
                     "interval is not one move counted several times.")
+
+    # ── FVG / IFVG ───────────────────────────────────────────────────────────
+    st.markdown(theme.section("Fair value gaps and inversions (FVG · IFVG)",
+                              "Market structure"), unsafe_allow_html=True)
+    st.caption(
+        "A **fair value gap** is a three-bar imbalance — price moved so fast "
+        "that a band went untraded. An **inverse FVG** is what that band "
+        "becomes once price *closes* clean through it: the framework says "
+        "polarity flips, so a bullish gap closed below stops being support "
+        "and starts acting as resistance. Finding the gaps is exact "
+        "arithmetic. Whether a flipped band is respected on the retest is a "
+        "claim, so it is measured below with an interval — and a wick through "
+        "a gap counts as a test, never as an inversion.")
+
+    _fv_c1, _fv_c2 = st.columns(2)
+    _fv_hz = _fv_c1.slider("Retest outcome read after (bars)", 2, 20, 5, 1,
+                           key="fvg_hz")
+    _fv_min = _fv_c2.slider("Minimum gap size (% of price)", 0.0, 2.0, 0.1, 0.05,
+                            key="fvg_min",
+                            help="Bands thinner than this are noise rather "
+                                 "than imbalance and are ignored.") / 100.0
+    _fvg = fvg_mod.detect(md.history, horizon=int(_fv_hz),
+                          min_gap_pct=float(_fv_min))
+    if _fvg is None:
+        st.info("Not enough daily history on this name to map fair value gaps.")
+    else:
+        _f1, _f2, _f3, _f4 = st.columns(4)
+        _f1.markdown(metric_card("Gaps found", f"{len(_fvg.gaps)}", sub=True),
+                     unsafe_allow_html=True)
+        _f2.markdown(metric_card("Still open", f"{len(_fvg.open_gaps)}",
+                                 sub=True), unsafe_allow_html=True)
+        _f3.markdown(metric_card("Inverted (IFVG)",
+                                 f"{len(_fvg.inverted_gaps)}", sub=True),
+                     unsafe_allow_html=True)
+        _fv_rate = (f"{_fvg.rate*100:.0f}%"
+                    if _fvg.n_retests >= fvg_mod.MIN_RETESTS else "—")
+        _f4.markdown(metric_card("Retests respected", _fv_rate, sub=True),
+                     unsafe_allow_html=True)
+
+        st.markdown(f"_{fvg_mod.summary_note(_fvg, price)}_")
+        st.markdown(f"**{_fvg.verdict}**")
+
+        _near_ifvg = fvg_mod.active_ifvgs(_fvg, price, n=5)
+        _near_open = fvg_mod.unfilled_gaps(_fvg, price, n=5)
+        if _near_ifvg or _near_open:
+            with st.expander("Live bands nearest the current price"):
+                if _near_ifvg:
+                    st.markdown("**Inverted bands (IFVG)**")
+                    st.dataframe(fvg_mod.gap_frame(_near_ifvg),
+                                 hide_index=True, width="stretch")
+                if _near_open:
+                    st.markdown("**Untouched gaps (original polarity)**")
+                    st.dataframe(fvg_mod.gap_frame(_near_open),
+                                 hide_index=True, width="stretch")
+                st.caption(
+                    "A band is listed as inverted only after a close beyond "
+                    "its far side. Retests are counted non-overlapping, so a "
+                    "single long move back through a zone is one observation.")
 
     # ── Overnight vs intraday ────────────────────────────────────────────────
     _split = micro_mod.overnight_intraday_split(md.history)
