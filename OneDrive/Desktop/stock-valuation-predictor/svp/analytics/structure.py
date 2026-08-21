@@ -60,9 +60,15 @@ class StructureEvent:
     kind: Literal["BOS", "MSS"]
     direction: Literal["bullish", "bearish"]
     level: float                    # the swing level that was broken
-    date: str                       # the bar that closed beyond it
+    date: str                       # the bar that closed beyond it, ISO
     idx: int
     prior_bias: Bias
+    #: The original index value of the breaking bar, carried verbatim.
+    #: ``date`` is a display string; re-parsing it drops the timezone, and
+    #: comparing that against a tz-aware price index raises. Keeping the raw
+    #: label means callers plot against the same object the frame is indexed
+    #: by and the question never arises.
+    ts: object = None
 
     @property
     def label(self) -> str:
@@ -279,7 +285,7 @@ def analyse(df: pd.DataFrame, k: int = DEFAULT_SWING,
             kind = "BOS" if bias == "bullish" else "MSS"
             events.append(StructureEvent(
                 kind=kind, direction="bullish", level=last_high.price,
-                date=str(idx[i])[:10], idx=i, prior_bias=bias))
+                date=str(idx[i])[:10], idx=i, prior_bias=bias, ts=idx[i]))
             ob = _find_order_block(o, h, low_a, c, vol, idx, i, "bullish",
                                    block_lookback)
             if ob is not None:
@@ -290,7 +296,7 @@ def analyse(df: pd.DataFrame, k: int = DEFAULT_SWING,
             kind = "BOS" if bias == "bearish" else "MSS"
             events.append(StructureEvent(
                 kind=kind, direction="bearish", level=last_low.price,
-                date=str(idx[i])[:10], idx=i, prior_bias=bias))
+                date=str(idx[i])[:10], idx=i, prior_bias=bias, ts=idx[i]))
             ob = _find_order_block(o, h, low_a, c, vol, idx, i, "bearish",
                                    block_lookback)
             if ob is not None:

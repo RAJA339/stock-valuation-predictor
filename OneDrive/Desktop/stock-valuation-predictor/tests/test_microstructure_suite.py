@@ -22,7 +22,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from svp.analytics import (                                   # noqa: E402
-    candles as CD, regime_state as RS, structure as ST, volume_profile as VP,
+    amd as AMD, candles as CD, fvg as FV, regime_state as RS,
+    structure as ST, volume_profile as VP,
 )
 from svp.models import gex as GEX                             # noqa: E402
 
@@ -40,6 +41,65 @@ def _walk(n=400, seed=0, vol=0.012, drift=0.0):
     rng = np.random.default_rng(seed)
     c = 100 * np.exp(np.cumsum(rng.normal(drift, vol, n)))
     return _ohlcv([(x, x * 1.008, x * 0.992, x, 1e6) for x in c])
+
+
+# ── Timezone-aware data ──────────────────────────────────────────────────────
+class TestTimezoneAwareInput:
+    """
+    Production data is tz-aware; the offline data CI falls back to is not.
+
+    That gap shipped a real bug: the Structure Desk re-parsed an event's
+    display date into a tz-naive Timestamp and compared it against a tz-aware
+    price index, which raises. Every analytics module is therefore exercised
+    against a tz-aware frame here — the shape yfinance actually returns for
+    equities — so the suite stops testing a world the app never runs in.
+    """
+
+    @staticmethod
+    def _aware(n=400, seed=3, tz="America/New_York"):
+        rng = np.random.default_rng(seed)
+        c = 100 * np.exp(np.cumsum(rng.normal(0, 0.015, n)))
+        idx = pd.date_range("2023-01-03", periods=n, freq="B", tz=tz)
+        return pd.DataFrame(
+            {"Open": c, "High": c * 1.01, "Low": c * 0.99, "Close": c,
+             "Volume": np.full(n, 1e6)}, index=idx)
+
+    def test_structure_events_carry_a_comparable_timestamp(self):
+        """The exact failure: event stamps must compare against the index."""
+        df = self._aware()
+        sm = ST.analyse(df)
+        assert sm is not None and sm.events
+        x0, x1 = df.index[100], df.index[-1]
+        for e in sm.events:
+            assert e.ts is not None, "event lost its index label"
+            # Would raise TypeError if ts were tz-naive.
+            _ = x0 <= e.ts <= x1
+        assert any(x0 <= e.ts <= x1 for e in sm.events)
+
+    def test_event_ts_matches_the_frame_index(self):
+        df = self._aware()
+        sm = ST.analyse(df)
+        for e in sm.events:
+            assert e.ts in df.index
+
+    def test_every_analytics_module_accepts_tz_aware_frames(self):
+        df = self._aware(n=600, seed=5)
+        assert ST.analyse(df) is not None
+        assert CD.detect(df) is not None
+        assert CD.anchored_vwap(df) is not None
+        assert RS.classify(df) is not None
+        assert VP.profile(df) is not None
+        assert FV.detect(df) is not None
+        assert AMD.detect(df) is not None
+
+    def test_utc_and_naive_give_the_same_structure(self):
+        """Timezone is presentation; the structure read must not depend on it."""
+        aware = self._aware(seed=7)
+        naive = aware.copy()
+        naive.index = naive.index.tz_localize(None)
+        a, n = ST.analyse(aware), ST.analyse(naive)
+        assert [e.kind for e in a.events] == [e.kind for e in n.events]
+        assert a.bias == n.bias
 
 
 # ── P1: market structure ─────────────────────────────────────────────────────

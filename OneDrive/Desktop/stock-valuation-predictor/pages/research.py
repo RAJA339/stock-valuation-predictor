@@ -1024,8 +1024,13 @@ with tab_guard("Structure Desk"):
         # Structure events inside the window.
         if _smap is not None:
             for _e in _smap.events:
-                _ts = pd.Timestamp(_e.date)
-                if _ts < pd.Timestamp(_x0) or _ts > pd.Timestamp(_x1):
+                # The event carries the frame's own index label, so this
+                # compares like with like. Re-parsing the display date built a
+                # tz-naive stamp and comparing it against a tz-aware price
+                # index raised — the offline data CI runs on is tz-naive,
+                # which is exactly why the suite never saw it.
+                _ts = _e.ts if _e.ts is not None else pd.Timestamp(_e.date)
+                if _ts < _x0 or _ts > _x1:
                     continue
                 _fig.add_annotation(
                     x=_ts, y=_e.level, text=_e.label, showarrow=True,
