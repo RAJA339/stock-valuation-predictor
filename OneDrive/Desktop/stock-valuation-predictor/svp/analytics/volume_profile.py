@@ -53,6 +53,10 @@ class VolumeProfile:
     low: float = 0.0                                        # range extremes
     high: float = 0.0
     lvn: list[float] = field(default_factory=list)          # low-volume nodes
+    #: High-volume nodes — shelves where trade concentrated. Price tends to
+    #: linger at them (they are where agreement already exists), which is the
+    #: mirror of the LVN reading rather than a separate idea.
+    hvn: list[float] = field(default_factory=list)
 
     def position_of(self, price: float) -> str:
         """Where a price sits relative to the value area."""
@@ -137,7 +141,8 @@ def _value_area(prices: np.ndarray, volumes: np.ndarray,
 
 
 def profile(df: pd.DataFrame, bins: int = DEFAULT_BINS,
-            lvn_quantile: float = 0.15) -> Optional[VolumeProfile]:
+            lvn_quantile: float = 0.15,
+            hvn_quantile: float = 0.85) -> Optional[VolumeProfile]:
     """
     Build the volume profile of ``df`` (already sliced to the fixed range).
 
@@ -183,6 +188,12 @@ def profile(df: pd.DataFrame, bins: int = DEFAULT_BINS,
     # the range has enough structure for "thin" to mean anything.
     thin = float(np.quantile(volumes, lvn_quantile)) if bins >= 12 else -1.0
     lvn = [float(m) for m, v in zip(mids, volumes) if 0 < v <= thin]
+    # High-volume nodes: the heavy shelves. Reported only alongside the thin
+    # ones, since "heavy" and "thin" are the same statement about the same
+    # distribution read from opposite ends.
+    thick = (float(np.quantile(volumes, hvn_quantile)) if bins >= 12
+             else float("inf"))
+    hvn = [float(m) for m, v in zip(mids, volumes) if v >= thick]
 
     return VolumeProfile(
         poc=float(mids[poc_idx]),
@@ -195,4 +206,5 @@ def profile(df: pd.DataFrame, bins: int = DEFAULT_BINS,
         low=lo_px,
         high=hi_px,
         lvn=lvn,
+        hvn=hvn,
     )

@@ -76,9 +76,10 @@ from svp.models import (
     regime as regime_mod, relative as relative_mod, sizing as sizing_mod,
     derivatives as deriv_mod, crypto_ml as cml_mod,
     crypto_regime as cregime_mod, reverse_dcf as rdcf_mod,
-    conformal as conf_mod, regime_dcf as rdcf_regime,
+    conformal as conf_mod, regime_dcf as rdcf_regime, gex as gex_mod,
 )
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from svp.analytics import (
     peers as peers_mod, technical as technical_mod, quality as quality_mod,
     screener as screener_mod, indicators as ind_mod, accuracy as acc_mod,
@@ -86,6 +87,8 @@ from svp.analytics import (
     fracdiff as fracdiff_mod, flow as flow_mod, snapshot as snap_mod,
     confluence as confl_mod, volume_profile as vp_mod, amd as amd_mod,
     fvg as fvg_mod, risk as risk_mod, transcript as tscript_mod,
+    structure as struct_mod, candles as candle_mod,
+    regime_state as rstate_mod,
 )
 from svp import lwchart as lwc_mod
 from svp.data import intraday as intraday_mod
@@ -634,7 +637,8 @@ st.divider()
 # arithmetic and worse groups. The grouping is by what a reader wants, not by
 # what the code shares.
 SECTIONS: list[tuple[str, list[str]]] = [
-    ("Market",    ["Chart Studio", "Charts", "Execution & Timing", "Microstructure"]),
+    ("Market",    ["Chart Studio", "Structure Desk", "Charts",
+                   "Execution & Timing", "Microstructure"]),
     ("Value",     ["Valuation", "Explainability", "DCF & Scenario", "Peers", "Screener"]),
     ("Risk",      ["Guardrails", "Backtesting", "Options & Futures"]),
     ("Filings",   ["Ask the Filings", "Fundamental Δ", "Segments"]),
@@ -948,6 +952,237 @@ with tab_guard("Chart Studio"):
                     [{"Component": k, "Reading (0–100)": v}
                      for k, v in _snap.components.items()]),
                     hide_index=True, use_container_width=True)
+
+with tab_guard("Structure Desk"):
+    st.markdown(theme.section("Market structure, patterns and volume at price",
+                              "ALGORITHMIC PRICE ACTION"), unsafe_allow_html=True)
+    st.caption(
+        "One chart carrying four independent reads: the structural events "
+        "that define trend (BOS vs MSS), the order blocks those breaks left "
+        "behind, validated three-bar patterns with their anchored VWAP, and "
+        "the volume profile of the window. Each is mechanical — the panel "
+        "describes what price did, and where a claim is made about what "
+        "follows, it is measured elsewhere and labelled as such.")
+
+    _sd_hist = md.history
+    if _sd_hist is None or _sd_hist.empty or len(_sd_hist) < 120:
+        st.info("Not enough daily history on this name for a structure read.")
+    else:
+        _sd1, _sd2, _sd3, _sd4 = st.columns([1.2, 1, 1, 1])
+        _sd_range = _sd1.radio("Window", ["6M", "1Y", "2Y", "5Y"], index=1,
+                               horizontal=True, key="sd_range")
+        _sd_k = _sd2.slider("Swing sensitivity (bars)", 2, 8, 3, 1, key="sd_k",
+                            help="Bars either side that must be lower for a "
+                                 "pivot to count. Larger means fewer, more "
+                                 "significant swings.")
+        _sd_show_ob = _sd3.toggle("Order blocks", value=True, key="sd_ob")
+        _sd_show_vp = _sd4.toggle("Volume profile", value=True, key="sd_vp")
+
+        _sd_bars = {"6M": 126, "1Y": 252, "2Y": 504, "5Y": 1260}[_sd_range]
+        _sd_win = _sd_hist.tail(_sd_bars)
+
+        # Structure is mapped on the FULL history — a block formed before the
+        # window still governs price inside it — then drawn where relevant.
+        _smap = struct_mod.analyse(_sd_hist, k=int(_sd_k))
+        _pats = candle_mod.detect(_sd_hist) or []
+        _vprof = vp_mod.profile(_sd_win) if _sd_show_vp else None
+
+        # ── The chart ────────────────────────────────────────────────────────
+        _fig = make_subplots(
+            rows=1, cols=2, shared_yaxes=True, column_widths=[0.82, 0.18],
+            horizontal_spacing=0.01,
+            specs=[[{"type": "candlestick"}, {"type": "bar"}]])
+        _fig.add_trace(go.Candlestick(
+            x=_sd_win.index, open=_sd_win["Open"], high=_sd_win["High"],
+            low=_sd_win["Low"], close=_sd_win["Close"], name="Price",
+            increasing_line_color=theme.EMERALD_BRIGHT,
+            decreasing_line_color=theme.GARNET_BRIGHT,
+            increasing_fillcolor=theme.EMERALD_BRIGHT,
+            decreasing_fillcolor=theme.GARNET_BRIGHT,
+        ), row=1, col=1)
+
+        _x0, _x1 = _sd_win.index[0], _sd_win.index[-1]
+
+        # Order blocks as shaded zones, demand green / supply red, untested
+        # drawn solid and mitigated ones faded — the status is the point.
+        if _sd_show_ob and _smap is not None:
+            for _b in _smap.nearest_blocks(price, n=8):
+                _fill = ("rgba(31,168,124,0.20)" if _b.kind == "demand"
+                         else "rgba(212,95,83,0.20)")
+                if _b.mitigated:
+                    _fill = _fill.replace("0.20", "0.08")
+                _fig.add_shape(
+                    type="rect", x0=_x0, x1=_x1, y0=_b.bottom, y1=_b.top,
+                    fillcolor=_fill, line=dict(width=0), layer="below",
+                    row=1, col=1)
+                _fig.add_annotation(
+                    x=_x1, y=_b.top, xref="x", yref="y",
+                    text=f"{_b.label} · {_b.impulse_volume_ratio:.1f}×",
+                    showarrow=False, font=dict(size=9, color=theme.MUTED),
+                    xanchor="right", yanchor="bottom", row=1, col=1)
+
+        # Structure events inside the window.
+        if _smap is not None:
+            for _e in _smap.events:
+                _ts = pd.Timestamp(_e.date)
+                if _ts < pd.Timestamp(_x0) or _ts > pd.Timestamp(_x1):
+                    continue
+                _fig.add_annotation(
+                    x=_ts, y=_e.level, text=_e.label, showarrow=True,
+                    arrowhead=2, arrowsize=0.8, arrowwidth=1,
+                    arrowcolor=(theme.EMERALD_BRIGHT
+                                if _e.direction == "bullish"
+                                else theme.GARNET_BRIGHT),
+                    font=dict(size=9, color=theme.TEXT),
+                    bgcolor=theme.PANEL, row=1, col=1)
+
+        # The most recent validated pattern, with its anchored VWAP.
+        _last_pat = _pats[-1] if _pats else None
+        if _last_pat is not None:
+            _av = candle_mod.anchored_vwap(_sd_hist,
+                                           anchor_idx=_last_pat.start_idx)
+            if _av is not None:
+                _seg = _av.vwap[_av.vwap.index >= _x0]
+                if len(_seg) > 1:
+                    _fig.add_trace(go.Scatter(
+                        x=_seg.index, y=_seg.values, mode="lines",
+                        name=f"AVWAP from {_av.anchor_date}",
+                        line=dict(color=theme.CHAMPAGNE, width=2)),
+                        row=1, col=1)
+                    for _band, _dash in ((_av.upper1, "dot"),
+                                         (_av.lower1, "dot"),
+                                         (_av.upper2, "dash"),
+                                         (_av.lower2, "dash")):
+                        _bs = _band[_band.index >= _x0]
+                        _fig.add_trace(go.Scatter(
+                            x=_bs.index, y=_bs.values, mode="lines",
+                            showlegend=False, hoverinfo="skip",
+                            line=dict(color=theme.PEARL_FAINT, width=1,
+                                      dash=_dash)), row=1, col=1)
+
+        # Volume profile on the right, POC and value area coloured.
+        if _vprof is not None:
+            _cols = []
+            for _m in _vprof.bin_prices:
+                if abs(_m - _vprof.poc) < 1e-9:
+                    _cols.append(theme.CHAMPAGNE)
+                elif _vprof.val <= _m <= _vprof.vah:
+                    _cols.append(theme.EMERALD_BRIGHT)
+                elif _m in _vprof.lvn:
+                    _cols.append(theme.GARNET_DIM)
+                else:
+                    _cols.append(theme.PEARL_FAINT)
+            _fig.add_trace(go.Bar(
+                x=_vprof.bin_volumes, y=_vprof.bin_prices, orientation="h",
+                marker_color=_cols, name="Volume at price",
+                hovertemplate="%{y:,.2f}<br>%{x:,.0f}<extra></extra>"),
+                row=1, col=2)
+            for _lvl, _nm in ((_vprof.poc, "POC"), (_vprof.vah, "VAH"),
+                              (_vprof.val, "VAL")):
+                _fig.add_hline(y=_lvl, line=dict(
+                    color=theme.CHAMPAGNE if _nm == "POC" else theme.PEARL_MUTED,
+                    width=1, dash="solid" if _nm == "POC" else "dot"),
+                    annotation_text=_nm, annotation_position="left",
+                    annotation_font=dict(size=9, color=theme.MUTED),
+                    row=1, col=1)
+
+        _fig.update_layout(
+            height=620, margin=dict(l=10, r=10, t=30, b=10),
+            paper_bgcolor=theme.PANEL, plot_bgcolor=theme.BG,
+            font=dict(color=theme.TEXT, size=11, family="Inter, sans-serif"),
+            xaxis_rangeslider_visible=False, bargap=0.02,
+            legend=dict(orientation="h", y=1.02, x=0,
+                        bgcolor="rgba(0,0,0,0)"),
+            hovermode="x unified",
+        )
+        _fig.update_xaxes(gridcolor=theme.GRID, row=1, col=1)
+        _fig.update_xaxes(showgrid=False, showticklabels=False, row=1, col=2)
+        _fig.update_yaxes(gridcolor=theme.GRID, side="right",
+                          title_text="Price ($)", row=1, col=1)
+        st.plotly_chart(_fig, use_container_width=True, key="structure_desk")
+
+        # ── Readings ─────────────────────────────────────────────────────────
+        if _smap is not None:
+            _bias_cls = {"bullish": "signal-buy", "bearish": "signal-sell",
+                         "neutral": "signal-hold"}[_smap.bias]
+            _m1, _m2, _m3, _m4 = st.columns(4)
+            _m1.markdown(
+                f'<div class="metric-card"><div class="metric-label">Structure '
+                f'bias</div><div class="{_bias_cls}">{_smap.bias.title()}'
+                f'</div></div>', unsafe_allow_html=True)
+            _m2.markdown(metric_card(
+                "Last event",
+                _smap.last_event.label if _smap.last_event else "—", sub=True),
+                unsafe_allow_html=True)
+            _m3.markdown(metric_card(
+                "Untested blocks",
+                f"{sum(1 for b in _smap.blocks if not b.mitigated)}", sub=True),
+                unsafe_allow_html=True)
+            _m4.markdown(metric_card(
+                "Validated patterns", f"{len(_pats)}", sub=True),
+                unsafe_allow_html=True)
+            st.markdown(f"_{_smap.reading(price)}_")
+
+            with st.expander("Structure events — BOS is continuation, MSS is a shift"):
+                if _smap.events:
+                    st.dataframe(struct_mod.event_frame(_smap.events),
+                                 hide_index=True, width="stretch")
+                st.caption(
+                    "A pivot is only knowable a few bars after it forms, and "
+                    "every event here is dated by the bar that *confirmed* it "
+                    "— reading a pivot as available on the bar it occurs is "
+                    "the most common way a structure backtest flatters itself.")
+            if _smap.blocks:
+                with st.expander("Order blocks and their mitigation status"):
+                    st.dataframe(struct_mod.block_frame(
+                        _smap.nearest_blocks(price, n=12)),
+                        hide_index=True, width="stretch")
+
+        if _pats:
+            st.markdown(theme.section("Three Soldiers / Three Crows",
+                                      "VALIDATED PATTERNS"),
+                        unsafe_allow_html=True)
+            st.markdown(f"_{_pats[-1].reading()}_")
+            st.dataframe(candle_mod.pattern_frame(_pats[-10:]),
+                         hide_index=True, width="stretch")
+            st.caption(
+                f"Filters applied: every bar above {candle_mod.VOLUME_MULTIPLE}× "
+                f"its 20-day average volume, wick under "
+                f"{candle_mod.MAX_WICK_FRACTION*100:.0f}% of range, body over "
+                f"{candle_mod.MIN_BODY_FRACTION*100:.0f}% of range, and each "
+                "open inside the previous body. Three green candles without "
+                "those conditions is drift, not participation — which is why "
+                "the unfiltered version of this pattern fires constantly and "
+                "means nothing.")
+        else:
+            st.caption("No three-bar sequences in this history passed the "
+                       "volume, wick and body filters.")
+
+        if _vprof is not None:
+            _v1, _v2, _v3, _v4 = st.columns(4)
+            _v1.markdown(metric_card("POC", f"${_vprof.poc:,.2f}"),
+                         unsafe_allow_html=True)
+            _v2.markdown(metric_card("Value area",
+                                     f"${_vprof.val:,.0f} – ${_vprof.vah:,.0f}",
+                                     sub=True), unsafe_allow_html=True)
+            _v3.markdown(metric_card("High-volume nodes",
+                                     f"{len(_vprof.hvn)}", sub=True),
+                         unsafe_allow_html=True)
+            _v4.markdown(metric_card("Low-volume nodes",
+                                     f"{len(_vprof.lvn)}", sub=True),
+                         unsafe_allow_html=True)
+            st.markdown(f"_{_vprof.reading(price)}_")
+            if _vprof.hvn or _vprof.lvn:
+                st.caption(
+                    ("High-volume shelves near "
+                     + ", ".join(f"${x:,.0f}" for x in _vprof.hvn[:4])
+                     + " — price has spent time agreeing there. "
+                     if _vprof.hvn else "")
+                    + ("Low-volume shelves near "
+                       + ", ".join(f"${x:,.0f}" for x in _vprof.lvn[:4])
+                       + " — price moved through these quickly, so they offer "
+                         "little traded history as reference."
+                       if _vprof.lvn else ""))
 
 with tab_guard("Charts"):
     c1, c2, c3 = st.columns([1.4, 1, 1])
@@ -1864,6 +2099,74 @@ with tab_guard("Backtesting"):
 # TAB 6 — EXECUTION & TIMING (regime + technical filters + sizing/risk floors)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_guard("Execution & Timing"):
+    # ── Five-state price regime ──────────────────────────────────────────────
+    st.markdown(theme.section("Price regime — trend, chop, or random walk",
+                              "STATE CLASSIFIER"), unsafe_allow_html=True)
+    st.caption(
+        "Two questions kept deliberately apart. **Is this trending at all?** "
+        "— the Hurst exponent measures persistence: whether moves tend to "
+        "extend (H > 0.55) or be given back (H < 0.45), with H ≈ 0.5 meaning "
+        "a random walk where neither trend-following nor mean-reversion has "
+        "anything to work with. **Which way, and how hard?** — ADX sizes the "
+        "trend and the ±DI spread signs it. Neither alone is enough: ADX runs "
+        "high in a strong trend *and* in violent chop, and Hurst says "
+        "persistent without saying up or down.")
+    _pstate = rstate_mod.classify(md.history)
+    if _pstate is None:
+        st.info("Not enough daily history to classify a price regime.")
+    else:
+        _ps1, _ps2, _ps3, _ps4 = st.columns(4)
+        _ps1.markdown(
+            f'<div class="metric-card"><div class="metric-label">State</div>'
+            f'<div class="{_pstate.badge_class}">{_pstate.state}</div></div>',
+            unsafe_allow_html=True)
+        _ps2.markdown(metric_card(
+            "Hurst (R/S)",
+            f"{_pstate.hurst_rs:.3f}" if _pstate.hurst_rs is not None else "—"),
+            unsafe_allow_html=True)
+        _ps3.markdown(metric_card(
+            "ADX(14)",
+            f"{_pstate.adx:.1f}" if _pstate.adx is not None else "—", sub=True),
+            unsafe_allow_html=True)
+        _ps4.markdown(metric_card(
+            "±DI spread",
+            f"{_pstate.di_spread:+.1f}" if _pstate.di_spread is not None
+            else "—", sub=True), unsafe_allow_html=True)
+        st.markdown(_pstate.narrative)
+
+        # Anchored VWAP with sigma envelopes, anchored to the window start.
+        _reg_av = candle_mod.anchored_vwap(md.history.tail(252))
+        if _reg_av is not None:
+            st.markdown(theme.section("Anchored VWAP with σ envelopes", ""),
+                        unsafe_allow_html=True)
+            _av_fig = go.Figure()
+            _avw = md.history.tail(252)
+            _av_fig.add_trace(go.Scatter(
+                x=_avw.index, y=_avw["Close"], name="Close", mode="lines",
+                line=dict(color=theme.PEARL, width=1.6)))
+            for _band, _nm, _dash in (
+                    (_reg_av.upper2, "+2σ", "dash"),
+                    (_reg_av.upper1, "+1σ", "dot"),
+                    (_reg_av.vwap, "AVWAP", "solid"),
+                    (_reg_av.lower1, "−1σ", "dot"),
+                    (_reg_av.lower2, "−2σ", "dash")):
+                _av_fig.add_trace(go.Scatter(
+                    x=_band.index, y=_band.values, name=_nm, mode="lines",
+                    line=dict(color=(theme.CHAMPAGNE if _nm == "AVWAP"
+                                     else theme.PEARL_FAINT),
+                              width=2 if _nm == "AVWAP" else 1, dash=_dash)))
+            _av_fig.update_layout(
+                height=380, margin=dict(l=10, r=10, t=30, b=10),
+                paper_bgcolor=theme.PANEL, plot_bgcolor=theme.BG,
+                font=dict(color=theme.TEXT, size=11, family="Inter, sans-serif"),
+                yaxis=dict(title="Price ($)", gridcolor=theme.GRID),
+                xaxis=dict(gridcolor=theme.GRID),
+                legend=dict(orientation="h", y=1.02, x=0,
+                            bgcolor="rgba(0,0,0,0)"),
+                hovermode="x unified")
+            st.plotly_chart(_av_fig, use_container_width=True, key="regime_avwap")
+            st.markdown(f"_{_reg_av.reading(price)}_")
+
     st.markdown(theme.section("Macro regime", "Regime"), unsafe_allow_html=True)
     rc1, rc2, rc3, rc4 = st.columns(4)
     rc1.metric("Regime", regime.regime, help=f"Detected via {regime.source.upper()}")
@@ -2480,6 +2783,87 @@ with tab_guard("Options & Futures"):
                 f"keeps working; only live quotes are affected."
             )
         st.warning(_msg)
+
+    # ── Gamma exposure and dealer positioning ────────────────────────────────
+    st.markdown(theme.section("Gamma exposure and dealer positioning", "GEX"),
+                unsafe_allow_html=True)
+    st.caption(
+        "Market makers sit on the other side of option flow and hedge it in "
+        "the underlying. **Long gamma** means they hedge against the move — "
+        "selling strength, buying weakness — which suppresses volatility and "
+        "pins price near heavy strikes. **Short gamma** means they hedge with "
+        "it, amplifying moves; that is the arrangement behind a gamma "
+        "squeeze. The zero-gamma flip is where one regime becomes the other.")
+    _gp = gex_mod.compute(chain, days_to_expiry=T_exp * 365, r=float(rf_rate))
+    if _gp is None:
+        st.info("Not enough strikes with usable open interest and implied "
+                "volatility on this expiry to build a gamma profile.")
+    else:
+        _g1, _g2, _g3, _g4 = st.columns(4)
+        _g1.markdown(
+            f'<div class="metric-card"><div class="metric-label">Gamma regime'
+            f'</div><div class="{_gp.badge_class}">'
+            f'{"Positive" if _gp.is_positive_gamma else "Negative"}</div></div>',
+            unsafe_allow_html=True)
+        _g2.markdown(metric_card("Net GEX (per 1% move)",
+                                 f"${_gp.total_gex/1e6:,.1f}M"),
+                     unsafe_allow_html=True)
+        _g3.markdown(metric_card(
+            "Volatility trigger",
+            f"${_gp.zero_gamma:,.2f}" if _gp.zero_gamma else "not in range",
+            sub=True), unsafe_allow_html=True)
+        _g4.markdown(metric_card(
+            "OI walls",
+            f"C {_gp.call_wall:,.0f} / P {_gp.put_wall:,.0f}"
+            if _gp.call_wall and _gp.put_wall else "—", sub=True),
+            unsafe_allow_html=True)
+
+        _gdf = _gp.frame()
+        _gfig = go.Figure()
+        _gfig.add_trace(go.Bar(
+            x=_gdf["Strike"], y=_gdf["Call GEX"], name="Call gamma",
+            marker_color=theme.EMERALD_BRIGHT))
+        _gfig.add_trace(go.Bar(
+            x=_gdf["Strike"], y=_gdf["Put GEX"], name="Put gamma",
+            marker_color=theme.GARNET_BRIGHT))
+        _gfig.add_trace(go.Scatter(
+            x=_gdf["Strike"], y=_gdf["Net GEX"].cumsum(), name="Cumulative net",
+            mode="lines", line=dict(color=theme.CHAMPAGNE, width=2),
+            yaxis="y2"))
+        _gfig.add_vline(x=spot, line=dict(color=theme.PEARL, width=1.5,
+                                          dash="dash"),
+                        annotation_text=f"Spot {spot:,.2f}",
+                        annotation_font=dict(size=10, color=theme.TEXT))
+        if _gp.zero_gamma:
+            _gfig.add_vline(x=_gp.zero_gamma,
+                            line=dict(color=theme.CHAMPAGNE, width=1.5,
+                                      dash="dot"),
+                            annotation_text="Zero gamma",
+                            annotation_font=dict(size=10,
+                                                 color=theme.CHAMPAGNE))
+        _gfig.update_layout(
+            height=420, barmode="relative",
+            margin=dict(l=10, r=10, t=30, b=10),
+            paper_bgcolor=theme.PANEL, plot_bgcolor=theme.BG,
+            font=dict(color=theme.TEXT, size=11, family="Inter, sans-serif"),
+            xaxis=dict(title="Strike", gridcolor=theme.GRID),
+            yaxis=dict(title="GEX ($ per 1% move)", gridcolor=theme.GRID,
+                       zerolinecolor=theme.BORDER),
+            yaxis2=dict(title="Cumulative", overlaying="y", side="right",
+                        showgrid=False),
+            legend=dict(orientation="h", y=1.02, x=0,
+                        bgcolor="rgba(0,0,0,0)"),
+            hovermode="x unified")
+        st.plotly_chart(_gfig, use_container_width=True, key="gex_profile")
+        st.markdown(f"_{_gp.reading()}_")
+        if _gp.dropped:
+            st.caption(f"{_gp.dropped} strikes were dropped for missing open "
+                       "interest or implied volatility rather than filled "
+                       "with a guess.")
+        if not chain.is_live:
+            st.warning("This profile is built on the **synthetic** chain "
+                       "above, so it exercises the maths but describes no "
+                       "real dealer positioning.")
 
     _cols = ["strike", "lastPrice", "bid", "ask", "openInterest", "volume", "impliedVolatility"]
 
