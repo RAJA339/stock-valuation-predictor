@@ -1003,15 +1003,22 @@ with tab_guard("Structure Desk"):
 
         _x0, _x1 = _sd_win.index[0], _sd_win.index[-1]
 
-        # The visible price range, fixed from the candles themselves. Without
-        # this every stray shape dictates the scale: a single order block a
-        # long way from spot stretched the axis and squashed the candles into
-        # a band, which is what made the first version of this chart
-        # unreadable. Overlays may now fall outside and simply clip.
-        _y_lo = float(_sd_win["Low"].min())
-        _y_hi = float(_sd_win["High"].max())
+        # The visible price range, taken from quantiles rather than the
+        # outright min and max. A single bad print — a split artefact or a
+        # stray tick — is enough to drag min/max hundreds of points away, and
+        # the axis then devotes most of its height to empty space while the
+        # real price action is squashed into a band. Measured: one bad bar in
+        # a year of data left the candles occupying 19% of the chart.
+        _lows = _sd_win["Low"].astype(float)
+        _highs = _sd_win["High"].astype(float)
+        _y_lo = float(_lows.quantile(0.005))
+        _y_hi = float(_highs.quantile(0.995))
+        # Whatever else is clipped, the latest price must be on screen.
+        _y_lo = min(_y_lo, price, float(_sd_win["Close"].iloc[-1]))
+        _y_hi = max(_y_hi, price, float(_sd_win["Close"].iloc[-1]))
         _pad = (_y_hi - _y_lo) * 0.06 or 1.0
         _y_range = [_y_lo - _pad, _y_hi + _pad]
+        _clipped_bars = int(((_lows < _y_range[0]) | (_highs > _y_range[1])).sum())
 
         def _in_view(bottom: float, top: float) -> bool:
             """True when a price band overlaps what is actually on screen."""
@@ -1140,18 +1147,25 @@ with tab_guard("Structure Desk"):
         _fig.update_xaxes(showgrid=False, showticklabels=False, row=1, col=2)
         # Pinning the range is what keeps the candles legible: overlays that
         # fall outside are clipped instead of rescaling the whole chart.
-        _fig.update_yaxes(gridcolor=theme.GRID, side="right",
+        # The axis sits on the LEFT: on the right it renders at the boundary
+        # between the two columns, where the volume-profile bars draw straight
+        # over the tick labels and leave them half-legible.
+        _fig.update_yaxes(gridcolor=theme.GRID, side="left",
                           title_text="Price ($)", range=_y_range,
                           autorange=False, row=1, col=1)
         st.plotly_chart(_fig, use_container_width=True, key="structure_desk")
         _drawn = len([b for b in _smap.nearest_blocks(price, n=14)
                       if _in_view(b.bottom, b.top)][:5]) if _smap else 0
         st.caption(
-            f"Price axis is fixed to this window's range "
+            f"Price axis is fixed to this window's 0.5–99.5 percentile range "
             f"(${_y_range[0]:,.2f}–${_y_range[1]:,.2f}); zones outside it are "
             f"clipped rather than rescaling the chart. {_drawn} order block"
             f"{'' if _drawn == 1 else 's'} in view, each drawn from the bar "
             "that formed it."
+            + (f" {_clipped_bars} bar{'' if _clipped_bars == 1 else 's'} fall "
+               "outside that range — usually a bad print or a split artefact "
+               "in the feed, and letting it set the scale is what squashes "
+               "everything else." if _clipped_bars else "")
             + ("" if _last_pat is not None else
                " No validated three-bar pattern falls inside this window, so "
                "no anchored VWAP is drawn — anchoring to one from outside the "

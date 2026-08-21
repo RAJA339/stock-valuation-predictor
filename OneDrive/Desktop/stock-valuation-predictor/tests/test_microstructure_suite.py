@@ -177,6 +177,42 @@ class TestStructure:
             else:
                 assert b.status == "untested" and b.touches == 0
 
+    def test_touches_count_visits_not_bars_spent_inside(self):
+        """
+        A block reported "tested x186" was really saying price spent 186 bars
+        in the zone. A test is an entry from outside; consecutive bars inside
+        are one visit, and price must leave before the next one counts.
+        """
+        sm = ST.analyse(_walk(n=800, seed=21), k=3)
+        assert sm.blocks
+        for b in sm.blocks:
+            # Recount visits directly from the bars and compare.
+            df = _walk(n=800, seed=21)
+            hi = df["High"].to_numpy()
+            lo = df["Low"].to_numpy()
+            visits, inside_prev = 0, False
+            for j in range(b.idx + 1, len(df)):
+                inside = bool(lo[j] <= b.top and hi[j] >= b.bottom)
+                if inside and not inside_prev:
+                    visits += 1
+                inside_prev = inside
+            assert b.touches == visits
+            # A visit count can never exceed the bars available after it.
+            assert b.touches <= len(df) - b.idx - 1
+
+    def test_a_single_uninterrupted_stay_counts_once(self):
+        """Price parked inside a zone for many bars is one test, not many."""
+        rows = [(100, 101, 99, 100, 1e6)] * 30
+        rows += [(100, 100.5, 96, 97, 3e6)]        # drop, leaving a block
+        rows += [(97, 104, 96, 103, 5e6)]          # impulse up
+        for px in np.linspace(104, 118, 12):       # run away
+            rows += [(px, px + 1, px - 1, px + 0.5, 2e6)]
+        rows += [(100, 101, 99, 100, 1e6)] * 40    # come back and PARK there
+        sm = ST.analyse(_ohlcv(rows), k=3)
+        for b in sm.blocks:
+            assert b.touches <= 3, (
+                f"parking inside a zone inflated the count to {b.touches}")
+
     def test_untested_blocks_are_a_subset_sorted_by_distance(self):
         sm = ST.analyse(_walk(seed=6, n=600), k=3)
         near = sm.untested_blocks(100.0, n=3)

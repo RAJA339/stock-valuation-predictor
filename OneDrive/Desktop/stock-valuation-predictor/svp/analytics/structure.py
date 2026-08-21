@@ -232,15 +232,26 @@ def _find_order_block(o: np.ndarray, h: np.ndarray, low_a: np.ndarray,
 
 def _mark_mitigation(blocks: list[OrderBlock], h: np.ndarray,
                      low_a: np.ndarray, idx) -> None:
-    """Flag blocks price has traded back into, and count the visits."""
+    """
+    Flag blocks price has traded back into, counting **distinct visits**.
+
+    A visit is an entry from outside the zone, not a bar that happens to
+    overlap it. Counting every overlapping bar reported blocks as "tested
+    ×186" — which was really "price spent 186 bars in this range", a
+    different and far less useful statement. Consecutive bars inside the
+    zone are one test; price must leave and come back for the next.
+    """
     n = len(h)
     for b in blocks:
+        inside_prev = False
         for j in range(b.idx + 1, n):
-            if low_a[j] <= b.top and h[j] >= b.bottom:
+            inside = bool(low_a[j] <= b.top and h[j] >= b.bottom)
+            if inside and not inside_prev:
                 b.touches += 1
                 if not b.mitigated:
                     b.mitigated = True
                     b.mitigation_date = str(idx[j])[:10]
+            inside_prev = inside
 
 
 def analyse(df: pd.DataFrame, k: int = DEFAULT_SWING,
