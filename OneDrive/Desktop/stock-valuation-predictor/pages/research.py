@@ -77,6 +77,7 @@ from svp.models import (
     derivatives as deriv_mod, crypto_ml as cml_mod,
     crypto_regime as cregime_mod, reverse_dcf as rdcf_mod,
     conformal as conf_mod, regime_dcf as rdcf_regime, gex as gex_mod,
+    verdict as verdict_mod,
 )
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -579,7 +580,30 @@ if st.button(("Following ✓" if _following else "Follow"), key="follow_btn"):
     watch_mod.toggle(_follow_key, tk)
     st.rerun()
 
-# ── Verdict — answered before the tabs, not inside one ───────────────────────
+# ── Verdict — decided once, here, and read by everything below ───────────────
+# P0-3. The banner and the signal card previously each decided for themselves
+# what the numbers meant, which is how a "signal is weak" banner came to sit
+# directly above a red Overvalued card computed from the same figures. One
+# function now decides; every consumer renders its fields.
+_dcf_for_verdict = st.session_state.get("rep_dcf")
+_fcf_for_verdict = raw.get("free_cash_flow")
+if _fcf_for_verdict is None and raw.get("op_cash_flow") is not None:
+    _fcf_for_verdict = raw["op_cash_flow"] - (raw.get("capex") or 0.0)
+VERDICT = verdict_mod.arbitrate(
+    ml_value=result.point, market_price=price,
+    band_low=result.low, band_high=result.high,
+    dcf_value=(_dcf_for_verdict.intrinsic_per_share
+               if _dcf_for_verdict is not None else None),
+    trailing_fcf=_fcf_for_verdict,
+)
+st.session_state["verdict"] = VERDICT
+
+st.markdown(
+    f'<div class="verdict"><div class="verdict-line">'
+    f'<b>{VERDICT.headline}.</b> '
+    f'<span class="verdict-tail">{VERDICT.detail}</span></div></div>',
+    unsafe_allow_html=True,
+)
 st.markdown(
     theme.verdict_bar(price, result.low, result.point, result.high),
     unsafe_allow_html=True,
@@ -617,9 +641,14 @@ h1.markdown(metric_card("Intrinsic Value", f"${result.point:.2f}"), unsafe_allow
 h2.markdown(metric_card("Range (p10–p90)", f"${result.low:.0f} – ${result.high:.0f}", sub=True),
             unsafe_allow_html=True)
 h3.markdown(metric_card("Market Price", f"${price:.2f}"), unsafe_allow_html=True)
+# The card reads the same arbitration the banner did — it cannot disagree
+# with it, because it is not permitted to decide anything itself.
 h4.markdown(
     f'<div class="metric-card"><div class="metric-label">Valuation Signal</div>'
-    f'<div class="{signal_class}">{signal_text}</div></div>',
+    f'<div class="{VERDICT.css_class}">{VERDICT.badge}</div>'
+    + (f'<div class="metric-note">{VERDICT.signal_pct:+.1f}% vs market</div>'
+       if VERDICT.show_percentage and VERDICT.signal_pct is not None else "")
+    + '</div>',
     unsafe_allow_html=True,
 )
 
@@ -1832,12 +1861,37 @@ with tab_guard("DCF & Scenario"):
     dcf_mc = get_dcf_mc_cached(float(fcf0), float(shares), float(net_debt),
                                wacc, tgrowth, ngrowth)
 
-    d1, d2, d3, d4 = st.columns(4)
-    d1.markdown(metric_card("DCF Intrinsic / Share", f"${dcf_res.intrinsic_per_share:.2f}"), unsafe_allow_html=True)
-    d2.markdown(metric_card("DCF Range (p10–p90)",
-                            f"${dcf_mc['p10']:.0f} – ${dcf_mc['p90']:.0f}", sub=True), unsafe_allow_html=True)
-    d3.markdown(metric_card("ML Intrinsic (point)", f"${result.point:.2f}"), unsafe_allow_html=True)
-    d4.markdown(metric_card("Market Price", f"${price:.2f}"), unsafe_allow_html=True)
+    # ── P0-3: a DCF is only shown when a DCF means something ─────────────────
+    # Discounting a cash burn returns a number, and that number is a negative
+    # equity value with no interpretation — everything downstream inherits it,
+    # which is how a "breaks even at −200bp" readout appeared for a name whose
+    # value never exceeded its price at any modelled rate.
+    _dcf_ok, _dcf_why = verdict_mod.dcf_is_meaningful(
+        fcf0 if fcf0 else None, dcf_res.intrinsic_per_share)
+    # Monte-Carlo draws are clipped at zero before any quantile is taken:
+    # equity value floors at zero, so a negative p10 is an artefact.
+    _mc_p10 = max(0.0, float(dcf_mc["p10"]))
+    _mc_p90 = max(_mc_p10, float(dcf_mc["p90"]))
+
+    if not _dcf_ok:
+        st.warning(f"**No DCF is shown for {tk}.** {_dcf_why}")
+        d3, d4 = st.columns(2)
+        d3.markdown(metric_card("ML Intrinsic (point)", f"${result.point:.2f}"),
+                    unsafe_allow_html=True)
+        d4.markdown(metric_card("Market Price", f"${price:.2f}"),
+                    unsafe_allow_html=True)
+    else:
+        d1, d2, d3, d4 = st.columns(4)
+        d1.markdown(metric_card("DCF Intrinsic / Share",
+                                f"${dcf_res.intrinsic_per_share:.2f}"),
+                    unsafe_allow_html=True)
+        d2.markdown(metric_card("DCF Range (p10–p90)",
+                                f"${_mc_p10:.0f} – ${_mc_p90:.0f}", sub=True),
+                    unsafe_allow_html=True)
+        d3.markdown(metric_card("ML Intrinsic (point)", f"${result.point:.2f}"),
+                    unsafe_allow_html=True)
+        d4.markdown(metric_card("Market Price", f"${price:.2f}"),
+                    unsafe_allow_html=True)
 
     g1, g2 = st.columns(2)
     with g1:
@@ -1865,72 +1919,85 @@ with tab_guard("DCF & Scenario"):
         ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
         st.pyplot(fig, width="stretch"); plt.close(fig)
 
+    # Copy is selected by the verdict, never fixed. The sentence that used to
+    # sit here promised that "agreement between them strengthens the valuation
+    # thesis" and printed regardless of whether the estimates agreed — under
+    # MRNA it appeared beneath a DCF of −$104.53 and an ML value of $4.45.
     st.caption(
-        "Hybrid view: the ML model and traditional DCF are independent estimates. "
-        "Agreement between them strengthens the valuation thesis; divergence flags "
-        "assumptions worth revisiting."
-    )
+        "Hybrid view: the ML model and traditional DCF are independent "
+        "estimates. "
+        + verdict_mod.reconciliation_copy(
+            VERDICT, result.point,
+            dcf_res.intrinsic_per_share if _dcf_ok else None, price))
 
     # ── Rate sensitivity ─────────────────────────────────────────────────────
-    st.markdown(theme.section("If rates move", "Sensitivity"), unsafe_allow_html=True)
-    st.caption(
-        "The same DCF re-run across a parallel shift in the discount rate. This "
-        "is the honest way to read a DCF: the output moves far more with the "
-        "discount rate than with the growth assumptions people spend their time "
-        "arguing about. Terminal growth is deliberately held fixed — in reality "
-        "a rate move and growth expectations are linked, but modelling that here "
-        "would bury a large assumption inside a one-variable sensitivity check."
-    )
-    _shocks = dcf_mod.rate_shock(dcf_in)
-    st.session_state["rep_rate_shock"] = _shocks
-    _dur = dcf_mod.duration_estimate(_shocks)
+    # Suppressed with the DCF itself: re-running a meaningless model across a
+    # rate curve produces a meaningless curve, and the break-even readout
+    # beneath it then reports a rate at which nothing actually happens.
+    if not _dcf_ok:
+        st.info("Rate sensitivity is not shown either — it re-runs the same "
+                "DCF across a range of discount rates, and a model that is "
+                "not meaningful at one rate is not meaningful at seven.")
+    else:
+        st.markdown(theme.section("If rates move", "Sensitivity"), unsafe_allow_html=True)
+        st.caption(
+            "The same DCF re-run across a parallel shift in the discount rate. This "
+            "is the honest way to read a DCF: the output moves far more with the "
+            "discount rate than with the growth assumptions people spend their time "
+            "arguing about. Terminal growth is deliberately held fixed — in reality "
+            "a rate move and growth expectations are linked, but modelling that here "
+            "would bury a large assumption inside a one-variable sensitivity check."
+        )
+        _shocks = dcf_mod.rate_shock(dcf_in)
+        st.session_state["rep_rate_shock"] = _shocks
+        _dur = dcf_mod.duration_estimate(_shocks)
 
-    _rs1, _rs2 = st.columns([1.35, 1])
-    with _rs1:
-        fig, ax = plt.subplots(figsize=(5.6, 3.2))
-        theme.style_axes(fig, ax)
-        _xs = [s.shock_bp for s in _shocks]
-        _ys = [s.intrinsic_per_share for s in _shocks]
-        ax.plot(_xs, _ys, color=theme.GREEN, lw=2, marker="o", ms=4)
-        ax.axhline(price, color=theme.RED, lw=1.4, ls="--", label=f"Market ${price:.0f}")
-        ax.axvline(0, color=theme.FAINT, lw=1)
-        ax.set_xlabel("Discount-rate shock (bp)")
-        ax.set_ylabel("Fair value / share ($)")
-        ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
-        st.pyplot(fig, width="stretch"); plt.close(fig)
-    with _rs2:
-        if _dur is not None:
-            st.markdown(
-                metric_card("Sensitivity", f"{_dur:.1f}%") +
-                '<div class="metric-note">fair-value change per 100bp, '
-                'measured across the ±100bp points</div>',
-                unsafe_allow_html=True,
-            )
-        _break = [s for s in _shocks if s.intrinsic_per_share < price]
-        if _break:
-            st.markdown(
-                metric_card("Breaks even at", f"{_break[0].shock_bp:+d}bp", sub=True) +
-                '<div class="metric-note">smallest modelled rate rise at which '
-                'fair value falls below the market price</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                metric_card("Breaks even at", "beyond +200bp", sub=True) +
-                '<div class="metric-note">fair value stays above the market '
-                'price across every shock modelled</div>',
-                unsafe_allow_html=True,
-            )
+        _rs1, _rs2 = st.columns([1.35, 1])
+        with _rs1:
+            fig, ax = plt.subplots(figsize=(5.6, 3.2))
+            theme.style_axes(fig, ax)
+            _xs = [s.shock_bp for s in _shocks]
+            _ys = [s.intrinsic_per_share for s in _shocks]
+            ax.plot(_xs, _ys, color=theme.GREEN, lw=2, marker="o", ms=4)
+            ax.axhline(price, color=theme.RED, lw=1.4, ls="--", label=f"Market ${price:.0f}")
+            ax.axvline(0, color=theme.FAINT, lw=1)
+            ax.set_xlabel("Discount-rate shock (bp)")
+            ax.set_ylabel("Fair value / share ($)")
+            ax.legend(facecolor=theme.BG, labelcolor=theme.TEXT, fontsize=8)
+            st.pyplot(fig, width="stretch"); plt.close(fig)
+        with _rs2:
+            if _dur is not None:
+                st.markdown(
+                    metric_card("Sensitivity", f"{_dur:.1f}%") +
+                    '<div class="metric-note">fair-value change per 100bp, '
+                    'measured across the ±100bp points</div>',
+                    unsafe_allow_html=True,
+                )
+            _break = [s for s in _shocks if s.intrinsic_per_share < price]
+            if _break:
+                st.markdown(
+                    metric_card("Breaks even at", f"{_break[0].shock_bp:+d}bp", sub=True) +
+                    '<div class="metric-note">smallest modelled rate rise at which '
+                    'fair value falls below the market price</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    metric_card("Breaks even at", "beyond +200bp", sub=True) +
+                    '<div class="metric-note">fair value stays above the market '
+                    'price across every shock modelled</div>',
+                    unsafe_allow_html=True,
+                )
 
-    st.dataframe(
-        pd.DataFrame([{
-            "Shock": f"{s.shock_bp:+d}bp",
-            "Discount rate": f"{s.wacc*100:.2f}%",
-            "Fair value": f"${s.intrinsic_per_share:,.2f}",
-            "Change": f"{s.change_pct:+.1f}%",
-        } for s in _shocks]),
-        width="stretch", hide_index=True,
-    )
+        st.dataframe(
+            pd.DataFrame([{
+                "Shock": f"{s.shock_bp:+d}bp",
+                "Discount rate": f"{s.wacc*100:.2f}%",
+                "Fair value": f"${s.intrinsic_per_share:,.2f}",
+                "Change": f"{s.change_pct:+.1f}%",
+            } for s in _shocks]),
+            width="stretch", hide_index=True,
+        )
 
     # ── Saved scenarios ──────────────────────────────────────────────────────
     st.markdown(theme.section("Saved scenarios", "Scenario lab"), unsafe_allow_html=True)
