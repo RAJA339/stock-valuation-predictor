@@ -1579,10 +1579,27 @@ with tab_guard("Explainability"):
         theme.section(f"Feature attribution — {_attr_method}", "Explainability"),
         unsafe_allow_html=True,
     )
+    # ── What the model is actually trained on (P0-1, criterion 4) ────────────
+    # An external review found that the shipped model was fitted on
+    # rng.uniform draws labelled by a hand-written formula whose base term was
+    # the market price itself. Stating the target here is the minimum honesty
+    # owed to anyone reading a SHAP chart; docs/model_provenance.md carries
+    # the full finding and the arithmetic behind it.
+    st.warning(
+        "**What this model is trained on.** The shipped valuation model was "
+        "fitted on *synthetic* data — randomly generated features labelled by "
+        "a fixed formula whose largest term was the market price itself. It "
+        "therefore emulates that formula rather than valuing a company, and "
+        "its over/undervalued percentage is not evidence about this stock. "
+        "A replacement trained on real SEC filings against an observable "
+        "target — log(EV ÷ revenue) — is built in `svp/models/relative_value.py` "
+        "and is not yet promoted to this tab. See `docs/model_provenance.md`.")
+
     st.caption(
         "How each feature pushed the valuation away from the model's base value "
-        f"(**${attribution.base_value:.2f}**) toward the final prediction "
-        f"(**${attribution.prediction:.2f}**). Green = pushed value up, red = down."
+        f"(**\\${attribution.base_value:.2f}**) toward the final prediction "
+        f"(**\\${attribution.prediction:.2f}**). Green = pushed value up, "
+        "red = down."
     )
 
     # ── Plotly waterfall in dollars ──────────────────────────────────────────
